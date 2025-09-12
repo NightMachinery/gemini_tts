@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+import os
 
 try:
     from .tts_lib import TTSConfig, run_tts_pipeline
@@ -29,7 +30,10 @@ def main():
     parser.add_argument(
         "-o",
         "--out",
-        help="The base path for output files. Defaults to the first input file's name.",
+        help=(
+            "Output base path or directory. If it ends with '/', the first input file's basename"
+            " (sans extension) is appended. Defaults to first input file's name."
+        ),
         default=None,
     )
     parser.add_argument(
@@ -39,7 +43,7 @@ def main():
         default="gemini-2.5-flash-preview-tts",
         help="The Gemini TTS model to use for token counting and generation. (Default: %(default)s)",
     )
-    max_chunk_tokens_default = 8000
+    max_chunk_tokens_default = 7500
     #: 8192 is max supported by Flash TTS 2.5. Leave more margin of error if you want to use (old) offline token counters which are inaccurate. Even the online token counter needs some margin of error.
     parser.add_argument(
         "-t",
@@ -112,7 +116,17 @@ Examples:
 
     args = parser.parse_args()
 
-    out_path = Path(args.out) if args.out else Path(args.input_paths[0]).with_suffix("")
+    # Determine output base path. If --out ends with '/', treat it as a directory
+    # and append the first input file's basename (sans extension).
+    if args.out:
+        out_arg: str = str(args.out)
+        if out_arg.endswith("/") or (os.sep != "/" and out_arg.endswith(os.sep)):
+            first_base = Path(args.input_paths[0]).with_suffix("").name
+            out_path = Path(out_arg) / first_base
+        else:
+            out_path = Path(out_arg)
+    else:
+        out_path = Path(args.input_paths[0]).with_suffix("")
 
     ##
     model = args.model
