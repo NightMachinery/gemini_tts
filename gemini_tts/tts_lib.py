@@ -721,18 +721,18 @@ def _merge_audio_files(
 ) -> bool:
     """Merges all chunk .wav files into a single .mp3 file using ffmpeg."""
     _log("Merging audio chunks into final MP3 file...", 1, verbose)
-    successful_chunks = [c for c in chunks if c.status == "success"]
+    # Include both freshly generated (success) and cached (skipped) chunks
+    mergeable_chunks = [c for c in chunks if c.status in {"success", "skipped"}]
     _log(
-        f"Merging {len(successful_chunks)} successful chunks into {final_path}",
+        f"Merging {len(mergeable_chunks)} chunks (including cached) into {final_path}",
         2,
         verbose,
     )
     list_path = final_path.with_suffix(".txt")
     try:
         with open(list_path, "w", encoding="utf-8") as f:
-            for chunk in chunks:
-                if chunk.status == "success":
-                    f.write(f"file '{chunk.audio_path.resolve()}'\n")
+            for chunk in mergeable_chunks:
+                f.write(f"file '{chunk.audio_path.resolve()}'\n")
 
         command = [
             "ffmpeg",
