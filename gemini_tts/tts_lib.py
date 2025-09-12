@@ -16,6 +16,14 @@ from google.genai import types
 from tqdm.asyncio import tqdm
 from pynight.common_gemini_tts import GEMINI_VOICES
 
+# Try to import offline tokenizer, fall back to online API if not available
+try:
+    from vertexai.preview import tokenization
+    OFFLINE_TOKENIZER_AVAILABLE = True
+except ImportError:
+    OFFLINE_TOKENIZER_AVAILABLE = False
+    tokenization = None
+
 # A selection of diverse voices for automatic speaker assignment
 DEFAULT_VOICES = list(GEMINI_VOICES.keys())
 
@@ -70,6 +78,51 @@ def _log(message: str, level: int, config_verbose: int):
     """Log a message if the verbosity level is high enough."""
     if config_verbose >= level:
         print(f"[V{level}] {message}")
+
+
+def _create_tokenizer(model: str, verbose: int = 0):
+    """Create an offline or online tokenizer based on availability and model."""
+    if OFFLINE_TOKENIZER_AVAILABLE:
+        try:
+            # Map to supported offline tokenizer models
+            # Use Gemini 1.5 models as proxies for 2.5 models (similar tokenization)
+            model_name = model
+            if "gemini-2.5-flash" in model or "flash" in model.lower():
+                model_name = "gemini-1.5-flash-002"  # Use latest 1.5 flash as proxy
+            elif "gemini-2.5-pro" in model or "pro" in model.lower():
+                model_name = "gemini-1.5-pro-002"   # Use latest 1.5 pro as proxy
+            elif "gemini-1.5-flash" in model:
+                model_name = "gemini-1.5-flash-002"
+            elif "gemini-1.5-pro" in model:
+                model_name = "gemini-1.5-pro-002"
+            elif "gemini-1.0-pro" in model:
+                model_name = "gemini-1.0-pro-002"
+            else:
+                # Default fallback
+                model_name = "gemini-1.5-flash-002"
+            
+            tokenizer = tokenization.get_tokenizer_for_model(model_name)
+            if model != model_name:
+                _log(f"Using offline tokenizer {model_name} as proxy for {model}", 2, verbose)
+            else:
+                _log(f"Using offline tokenizer for {model_name}", 2, verbose)
+            return tokenizer, True
+        except Exception as e:
+            _log(f"Failed to create offline tokenizer: {e}, falling back to online API", 1, verbose)
+    
+    _log("Using online API for token counting", 2, verbose)
+    return None, False
+
+
+def _count_tokens_offline(tokenizer, text: str) -> int:
+    """Count tokens using the offline tokenizer."""
+    return tokenizer.count_tokens(text).total_tokens
+
+
+async def _count_tokens_online(client, model: str, text: str) -> int:
+    """Count tokens using the online API."""
+    result = await client.aio.models.count_tokens(model=model, contents=text)
+    return result.total_tokens
 
 
 def _read_and_join_files(input_paths: List[Path]) -> str:
@@ -147,29 +200,77 @@ async def _chunk_text(
         f"^({'|'.join(re.escape(s) for s in speakers)}):", re.MULTILINE
     ) if speakers else None
 
+    # Initialize tokenizer (offline if available, online as fallback)
+    tokenizer, use_offline = _create_tokenizer(model, verbose)
+    
+    # Count tokens function based on tokenizer type
+    async def count_tokens(text: str) -> int:
+        if use_offline:
+            return _count_tokens_offline(tokenizer, text)
+        else:
+            return await _count_tokens_online(client, model, text)
+
+    # Rough estimation for initial expansion (only used if offline tokenizer not available)
+    CHARS_PER_TOKEN_ESTIMATE = 4
+
     while current_line_idx < len(lines):
-        # Start with a single line and expand until we hit the token limit
         chunk_lines = [lines[current_line_idx]]
+        current_chars = len(chunk_lines[0])
         end_idx = current_line_idx + 1
         
-        # Expand chunk until we hit token limit
-        while end_idx < len(lines):
-            potential_chunk = "\n".join(chunk_lines + [lines[end_idx]])
-            token_count_result = await client.aio.models.count_tokens(
-                model=model, contents=potential_chunk
-            )
-            
-            if token_count_result.total_tokens > max_tokens:
-                break
+        # If we have offline tokenizer, we can be more aggressive with expansion
+        # Otherwise, use character-based estimation first
+        if use_offline:
+            # With offline tokenizer, we can afford to check every few lines
+            while end_idx < len(lines):
+                potential_chunk = "\n".join(chunk_lines + [lines[end_idx]])
+                token_count = await count_tokens(potential_chunk)
                 
-            chunk_lines.append(lines[end_idx])
-            end_idx += 1
+                if token_count > max_tokens:
+                    break
+                    
+                chunk_lines.append(lines[end_idx])
+                end_idx += 1
+        else:
+            # First, do a rough expansion based on character estimate
+            while end_idx < len(lines):
+                line_chars = len(lines[end_idx]) + 1  # +1 for newline
+                estimated_tokens = (current_chars + line_chars) / CHARS_PER_TOKEN_ESTIMATE
+                
+                # If we're getting close to the limit, switch to precise token counting
+                if estimated_tokens > max_tokens * 0.8:  # Use 80% threshold for safety
+                    break
+                    
+                chunk_lines.append(lines[end_idx])
+                current_chars += line_chars
+                end_idx += 1
+            
+            # Now use binary search to find the exact boundary using token counting
+            if end_idx < len(lines):  # Only if we stopped due to token limit, not end of text
+                left = len(chunk_lines)  # We know this fits
+                right = min(len(lines) - current_line_idx, left + 50)  # Check up to 50 more lines
+                best_end = left
+                
+                while left <= right:
+                    mid = (left + right) // 2
+                    test_lines = lines[current_line_idx:current_line_idx + mid]
+                    test_chunk = "\n".join(test_lines)
+                    
+                    token_count = await count_tokens(test_chunk)
+                    
+                    if token_count <= max_tokens:
+                        best_end = mid
+                        left = mid + 1
+                    else:
+                        right = mid - 1
+                
+                chunk_lines = lines[current_line_idx:current_line_idx + best_end]
+                end_idx = current_line_idx + best_end
         
-        # If we have more than one line and speaker detection is enabled,
-        # try to find a better breaking point by searching backward for speaker lines
+        # If we have speaker detection, try to find a better breaking point
         if len(chunk_lines) > 1 and speaker_line_regex and end_idx < len(lines):
             # Search backward from the end for the last speaker line
-            for i in range(len(chunk_lines) - 1, 0, -1):  # Don't include first line in search
+            for i in range(len(chunk_lines) - 1, 0, -1):
                 if speaker_line_regex.match(chunk_lines[i]):
                     # Found a speaker line, split here
                     speaker_line = chunk_lines[i]
@@ -181,9 +282,12 @@ async def _chunk_text(
         chunk_text = "\n".join(chunk_lines)
         if chunk_text.strip():
             chunks.append(chunk_text)
-            # Get actual token count for logging
-            final_token_result = await client.aio.models.count_tokens(model=model, contents=chunk_text)
-            _log(f"Created chunk {len(chunks)} with {final_token_result.total_tokens} tokens", 3, verbose)
+            # Get actual token count for final logging
+            if verbose >= 3:
+                final_token_count = await count_tokens(chunk_text)
+                _log(f"Created chunk {len(chunks)} with {final_token_count} tokens", 3, verbose)
+            else:
+                _log(f"Created chunk {len(chunks)}", 2, verbose)
         
         current_line_idx = end_idx
 
@@ -405,11 +509,16 @@ async def run_tts_pipeline(
             )
 
         _log("Chunking text based on token limits...", 1, config.verbose)
+        
         # Get total token count before chunking
-        total_token_result = await client.aio.models.count_tokens(
-            model=config.model, contents=full_text
-        )
-        total_tokens = total_token_result.total_tokens
+        tokenizer, use_offline = _create_tokenizer(config.model, config.verbose)
+        if use_offline:
+            total_tokens = _count_tokens_offline(tokenizer, full_text)
+        else:
+            total_token_result = await client.aio.models.count_tokens(
+                model=config.model, contents=full_text
+            )
+            total_tokens = total_token_result.total_tokens
         _log(f"Total input tokens: {total_tokens}", 1, config.verbose)
         
         text_chunks = await _chunk_text(

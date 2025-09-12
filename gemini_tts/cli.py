@@ -41,8 +41,8 @@ def main():
     parser.add_argument(
         "--max-chunk-tokens",
         type=int,
-        default=8192,
-        help="Max number of tokens per chunk. (Default: 8192)",
+        default=8000, #: 8192 is max supported by Flash TTS 2.5, and I am leaving some margin of error
+        help="Max number of tokens per chunk. (Default: 8000)",
     )
     parser.add_argument(
         "--speakers",
