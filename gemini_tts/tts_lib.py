@@ -526,7 +526,7 @@ async def _chunk_text(
 
         # Consider candidate cut points near the end of the previous chunk,
         # preferring speaker boundaries when available.
-        start_idx = max(1, len(prev_lines) - 30)  # scan up to last 30 lines
+        start_idx = max(1, len(prev_lines) - 130)  # scan up to last N lines
         candidate_indices = list(range(start_idx, len(prev_lines)))
         if speaker_line_regex:
             speaker_cuts = [
@@ -537,6 +537,7 @@ async def _chunk_text(
 
         best = None  # tuple[new_prev_text, new_last_text, score]
 
+        # ic(candidate_indices)
         for cut in candidate_indices:
             # Move prev_lines[cut:] to the beginning of last_lines
             moved_block = prev_lines[cut:]
@@ -557,11 +558,14 @@ async def _chunk_text(
 
             # Score by closeness to desired target (smaller is better)
             score = abs(desired_last - new_last_tokens)
+
+            # ic(cut, score, desired_last, new_last_tokens)
+
             if best is None or score < best[2]:
                 best = (new_prev_text, new_last_text, score)
 
             # Early exit on a very good fit
-            if new_last_tokens >= desired_last and score <= max(10, max_tokens // 100):
+            if score <= max(1000, max_tokens // 100):
                 break
 
         if best is None:
