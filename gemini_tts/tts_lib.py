@@ -793,7 +793,7 @@ async def _process_chunk(
 
                 chunk.status = "success"
                 _log(
-                    f"Chunk {chunk.index}: Generated audio with key ...{api_key[-4:]} (hash: {chunk.content_hash[:12]}): {chunk.audio_path}",
+                    f"Chunk {chunk.index}: Generated audio with key ...{api_key[-6:]} (hash: {chunk.content_hash[:12]}): {chunk.audio_path}",
                     2,
                     config.verbose,
                 )
@@ -802,7 +802,7 @@ async def _process_chunk(
 
             except Exception as e:
                 if _is_quota_exhausted_error(e):
-                    msg = f"Key ...{api_key[-4:]} is exhausted. Removing from pool."
+                    msg = f"Key ...{api_key[-6:]} is exhausted. Removing from pool."
                     _log(f"Chunk {chunk.index}: {msg}", 1, config.verbose)
                     await key_manager.mark_exhausted(api_key)
                     # Do NOT release the key on quota failure.
@@ -810,7 +810,7 @@ async def _process_chunk(
                     # Return key on other transient errors for retry
                     await key_manager.release(api_key)
 
-                error_msg = f"Attempt {attempt + 1}/{config.retries} failed: {e}"
+                error_msg = f"Attempt {attempt + 1}/{config.retries} failed (Key ...{api_key[-6:]}): {e}"
                 _log(f"Chunk {chunk.index}: {error_msg}", 2, config.verbose)
 
                 if attempt < config.retries - 1:
