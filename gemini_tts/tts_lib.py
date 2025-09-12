@@ -367,6 +367,9 @@ async def _chunk_text(
     client,
     model: str,
     verbose: int = 0,
+    # Rebalancing thresholds
+    small_last_fraction: float = 0.25,
+    last_target_fraction: float = 0.75,
 ) -> List[str]:
     """Breaks text into chunks using a tokenizer, preferring speaker boundaries."""
     chunks: List[str] = []
@@ -485,6 +488,104 @@ async def _chunk_text(
         current_line_idx = end_idx
 
     _log(f"Chunking complete: {len(chunks)} total chunks", 2, verbose)
+
+    # --- Optional post-balance: if the last chunk is tiny, try to even it out ---
+    # Motivation: Sometimes the greedy/binary search split can leave a very small
+    # final chunk. If so, try to move a trailing block from the previous chunk
+    # (preferably at a speaker boundary) so the last two chunks are more balanced
+    # while staying within the token limit.
+    async def _rebalance_trailing_small_chunk(chunks_in: List[str]) -> List[str]:
+        if len(chunks_in) < 2:
+            return chunks_in
+
+        # Token counting utility from the enclosing scope
+        async def tok_count(t: str) -> int:
+            return await count_tokens(t)
+
+        try:
+            last_tokens = await tok_count(chunks_in[-1])
+            prev_tokens = await tok_count(chunks_in[-2])
+        except Exception:
+            # If token counting fails here for any reason, return as-is
+            return chunks_in
+
+        # Trigger only when last chunk is notably small
+        SMALL_FRACTION = small_last_fraction  # ~<x% of the limit is considered too small
+        if last_tokens >= max_tokens * SMALL_FRACTION:
+            return chunks_in
+
+        prev_lines = chunks_in[-2].split("\n")
+        last_lines = chunks_in[-1].split("\n")
+
+        # Aim to bring last chunk to roughly the midpoint between the two,
+        # but never exceed a fraction of the hard limit (buffer for safety)
+        desired_last = min(
+            int(max_tokens * last_target_fraction),
+            (prev_tokens + last_tokens) // 2,
+        )
+
+        # Consider candidate cut points near the end of the previous chunk,
+        # preferring speaker boundaries when available.
+        start_idx = max(1, len(prev_lines) - 30)  # scan up to last 30 lines
+        candidate_indices = list(range(start_idx, len(prev_lines)))
+        if speaker_line_regex:
+            speaker_cuts = [
+                i for i in candidate_indices if speaker_line_regex.match(prev_lines[i])
+            ]
+            # Prefer speaker-aligned cut points, but fall back to any line if none
+            candidate_indices = speaker_cuts or candidate_indices
+
+        best = None  # tuple[new_prev_text, new_last_text, score]
+
+        for cut in candidate_indices:
+            # Move prev_lines[cut:] to the beginning of last_lines
+            moved_block = prev_lines[cut:]
+            if not moved_block:
+                continue
+            new_prev_text = "\n".join(prev_lines[:cut])
+            # Always move the block to the last chunk's front
+            new_last_text = "\n".join(moved_block + last_lines)
+
+            try:
+                new_last_tokens = await tok_count(new_last_text)
+            except Exception:
+                continue
+
+            # Must not exceed the hard limit
+            if new_last_tokens > max_tokens:
+                continue
+
+            # Score by closeness to desired target (smaller is better)
+            score = abs(desired_last - new_last_tokens)
+            if best is None or score < best[2]:
+                best = (new_prev_text, new_last_text, score)
+
+            # Early exit on a very good fit
+            if new_last_tokens >= desired_last and score <= max(10, max_tokens // 100):
+                break
+
+        if best is None:
+            return chunks_in
+
+        new_prev_text, new_last_text, _ = best
+        if new_prev_text.strip() and new_last_text.strip():
+            new_chunks = chunks_in[:-2] + [new_prev_text, new_last_text]
+            if verbose >= 2:
+                try:
+                    new_prev_tokens = await tok_count(new_prev_text)
+                    new_last_tokens = await tok_count(new_last_text)
+                    _log(
+                        f"Rebalanced last two chunks: {prev_tokens}→{new_prev_tokens}, {last_tokens}→{new_last_tokens} tokens",
+                        2,
+                        verbose,
+                    )
+                except Exception:
+                    _log("Rebalanced last chunk (token recount skipped)", 2, verbose)
+            return new_chunks
+
+        return chunks_in
+
+    chunks = await _rebalance_trailing_small_chunk(chunks)
     return chunks
 
 
