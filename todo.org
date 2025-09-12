@@ -1,5 +1,7 @@
 #+TITLE: gemini_tts/todo
 
+* update our chunker to try to split chunks more evenly when the last chunk becomes very small
+
 * IF `--files-as-chunk-boundary` (true by default) when reading multiple input files, treat each file as a chunk (break into further chunks if big enough)
 This leads to more semantic chunking.
 
