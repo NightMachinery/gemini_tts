@@ -1,9 +1,23 @@
 #+TITLE: gemini_tts/todo
 
-* =_determine_speakers=: see what happens if we increase the number of automatically determined speakers to more than the actual speaker number.
-If nothing breaks, it's a good idea to set higher limit. (allows guests in the podcasts, etc.)
+* argparse: Interpolate the default in the help strings instead of hardcoding it.
 
-* allow specifiying a file where each line is an API key.
+* IF `--files-as-chunk-boundary` (true by default) when reading multiple input files, treat each file as a chunk (break into further chunks if big enough)
+This leads to more semantic chunking.
+
+* preprocess
+#+BEGIN_SRC markdown
+Add `--preprocess=1`.
+
+If `--preprocess >= 1`:
+preprocess text to remove subsequent blank lines (i.e., replace `\n\n\n` with `\n\n` until no more possible)
+#+END_SRC
+
+* DONE =_determine_speakers=: see what happens if we increase the number of automatically determined speakers to more than the actual speaker number.
+If nothing breaks, it's a good idea to set higher limit. (allows guests in the podcasts, etc.)
+** fixed it and now it works, BUT gemini only supports two speakers.
+
+* DONE allow specifiying a file where each line is an API key.
 When this file is specified, if `--parallel=auto`, then use as many parallel agents as there are keys (but each agent should use its own key).
 
 When a key fails with quota failure, mark it in an in-memory structure as exhausted, and if the parallel agents were created with `auto`, decrease agents by one. Retry that chunk using other agents instead of failing. Only fail when all keys have failed.
