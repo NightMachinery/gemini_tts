@@ -1,5 +1,7 @@
 #+TITLE: gemini_tts
 
+# https://github.com/NightMachinery/gemini_tts
+
 Convert long documents into high-quality audio using Google’s Gemini TTS.
 Supports multi-speaker transcripts (e.g., podcast scripts), chunking by token
 budget, parallel generation, caching, and final MP3 merging via ffmpeg.
