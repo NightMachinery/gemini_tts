@@ -1,3 +1,123 @@
 #+TITLE: gemini_tts
 
-Converts long documents into audio files using the Gemini TTS API, with support for multi-speaker inputs (e.g., podcast scripts).
+Convert long documents into high-quality audio using Google’s Gemini TTS.
+Supports multi-speaker transcripts (e.g., podcast scripts), chunking by token
+budget, parallel generation, caching, and final MP3 merging via ffmpeg.
+
+* Features
+- Multi-speaker: auto-detect speakers from lines like =Name:= (default =auto:2=) or specify explicitly.
+- Smart chunking: splits on semantic/speaker boundaries under a token limit (default 8000).
+- Parallel + async: configurable concurrency with retries and backoff.
+- Caching: embeds a content hash and metadata in each WAV; reuses matching audio.
+- Deterministic outputs: optional 8-char hash in filenames for easy diffs.
+- Final MP3: merges chunk WAVs to a single VBR MP3 (=-q:a 3=) using =ffmpeg=.
+- CLI and Python API: use as a tool or a library.
+
+* Requirements
+- Python >=3.10
+- =ffmpeg= available on PATH
+- Environment: set =GEMINI_API_KEY=
+
+* Install
+#+begin_src bash
+# From source (editable install)
+pip install -r requirements.txt
+pip install -e .
+#+end_src
+
+This will install the executable =gemini-tts=.
+
+Install from GitHub (pip):
+#+begin_src bash
+# Latest from master
+pip install -U "gemini-tts @ git+https://github.com/NightMachinery/gemini_tts.git@master"
+#+end_src
+
+* Quickstart (CLI)
+#+begin_src bash
+export GEMINI_API_KEY="YOUR_KEY"
+
+# Minimal: auto-detect two speakers, default model
+gemini-tts examples/test_script.md -o tmp/test_show
+
+# Increase verbosity and parallelism
+gemini-tts -vvv --parallel=2 examples/test_script.md -o tmp/test_show
+
+# Explicit speakers (single or multi)
+gemini-tts --speakers='Host A,Host B' examples/test_script.md -o tmp/hosts
+
+# Map specific voices (voice names must be prebuilt voices supported by Gemini)
+gemini-tts --speakers='Host A:VoiceOne,Host B:VoiceTwo' examples/test_script.md -o tmp/voices
+
+# Disable multi-speaker mode entirely
+gemini-tts --no-multi-speakers examples/test_script.md -o tmp/single
+
+# Choose model (aliases: flash -> gemini-2.5-flash-preview-tts, g25 -> gemini-2.5-pro-preview-tts)
+gemini-tts --model flash examples/test_script.md -o tmp/flash
+#+end_src
+
+Outputs:
+- Chunk text files: =tmp_<base>_<i>.md=
+- Chunk audio files: =<base>_<i>[_<hash>].wav= (contains metadata, including =content_hash=)
+- Final audio: =<base>.mp3=
+
+If an existing chunk WAV’s embedded =content_hash= matches, it is reused (skipped).
+
+* Input Conventions
+- Multi-speaker detection looks for lines beginning with =Name:= (1–25 chars), e.g.:
+  - =Host A: Hello!=
+  - =Host B: Hi.=
+- Markdown-styled labels like =**Host A:**= are normalized before detection.
+- Provide one or more =.md=/=.txt= paths; contents are joined with a blank line.
+
+* CLI Reference (selected)
+- =--max-chunk-tokens <int>=: max tokens per chunk (default 8000).
+- =--speakers <spec>=: =auto:N=, =Name,Name=, or =Name:Voice,...=.
+- =--[no-]multi-speakers=: enable/disable multi-speaker processing (default on).
+- =--parallel <int>=: concurrent chunk requests (default 1).
+- =--retries <int>= / =--retry-sleep <sec>=: transient error handling.
+- =--[no-]hash-voices=: include speaker→voice map in cache hash (default on).
+- =--[no-]chunk-filename-include-hash=: add 8-char hash to WAV filenames (default on).
+- =-v/-vv/-vvv=: increase verbosity.
+
+Notes:
+- Token counting uses the Gemini API for accuracy; offline tokenizers are not used.
+- On quota exhaustion, new chunks stop scheduling; in-flight tasks finish and merge is skipped.
+
+* Python API
+#+begin_src python
+import asyncio
+from pathlib import Path
+from gemini_tts import TTSConfig, run_tts_pipeline
+
+config = TTSConfig(
+    model="gemini-2.5-flash-preview-tts",
+    max_chunk_tokens=8000,
+    speakers="auto:2",
+    speakers_enabled=True,
+    hash_voices=True,
+    chunk_filename_include_hash=True,
+    parallel=2,
+    retries=3,
+    retry_sleep=65,
+    cleanup_chunks=False,
+    verbose=1,
+)
+
+result = asyncio.run(
+    run_tts_pipeline([Path("examples/test_script.md")], Path("tmp/demo_out"), config=config)
+)
+
+if result.success:
+    print("Final MP3:", result.final_audio_path)
+else:
+    print("Error:", result.message)
+#+end_src
+
+* Troubleshooting
+- Missing =ffmpeg=: install it (e.g., macOS =brew install ffmpeg=, Debian/Ubuntu =sudo apt install ffmpeg=).
+- API errors or quota: reduce =--parallel=, increase =--retry-sleep=, or try later.
+- No speakers detected: provide =--speakers 'Name,Name'= or disable with =--no-multi-speakers=.
+
+* License
+MIT

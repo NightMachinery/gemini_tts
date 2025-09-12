@@ -2,7 +2,9 @@
 
 * DONE If the output path contains dirs, create them if they don't exist
 
-* _
+* If the output path ends with `/`, add the basename (sans extension) of the first input file to it.
+
+* DONE initial project description
 #+BEGIN_SRC markdown
 I want you to develop a `gemini_tts.py input_path ... ` multi-speaker TTS (podcast script into audio) script that:
 - first read and join all input paths using `\n\n`
