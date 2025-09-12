@@ -62,7 +62,7 @@ Examples:
     parser.add_argument(
         "--multi-speakers",
         action=argparse.BooleanOptionalAction,
-        dest="speakers_enabled",
+        dest="multi_speakers_p",
         default=True,
         help="Enable/disable multi-speaker mode. Use --no-multi-speakers to disable.",
     )
@@ -103,7 +103,8 @@ Examples:
         help="Remove intermediate chunk files after merging. Use --cleanup-chunks to enable.",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="count",
         default=0,
         help="Increase verbosity level. Use -v for basic info, -vv for detailed info, -vvv for debug info.",
@@ -126,7 +127,7 @@ Examples:
         model=model,
         max_chunk_tokens=args.max_chunk_tokens,
         speakers=args.speakers,
-        speakers_enabled=args.speakers_enabled,
+        speakers_enabled=args.multi_speakers_p,
         hash_voices=args.hash_voices,
         chunk_filename_include_hash=args.chunk_filename_include_hash,
         parallel=args.parallel,
