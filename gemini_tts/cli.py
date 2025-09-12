@@ -91,8 +91,14 @@ Examples:
     parser.add_argument(
         "--parallel",
         type=str,
-        default="1",
+        default="auto",
         help="Number of parallel API calls. Use 'auto' to set based on number of API keys. (Default: 1)",
+    )
+    parser.add_argument(
+        "--parallel-per-key",
+        type=int,
+        default=1,
+        help="Number of parallel requests allowed for a single API key. (Default: 1)",
     )
     parser.add_argument(
         "--retries",
@@ -145,7 +151,7 @@ Examples:
 
     # --- Parallelism Configuration ---
     if args.parallel.lower() == "auto":
-        parallel_count = len(api_keys)
+        parallel_count = len(api_keys) * args.parallel_per_key
     else:
         try:
             parallel_count = int(args.parallel)
@@ -185,6 +191,7 @@ Examples:
         hash_voices=args.hash_voices,
         chunk_filename_include_hash=args.chunk_filename_include_hash,
         parallel=parallel_count,
+        parallel_per_key=args.parallel_per_key,
         retries=args.retries,
         retry_sleep=args.retry_sleep,
         cleanup_chunks=args.cleanup_chunks,

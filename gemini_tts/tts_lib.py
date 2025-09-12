@@ -49,6 +49,7 @@ class TTSConfig:
     hash_voices: bool
     chunk_filename_include_hash: bool
     parallel: int
+    parallel_per_key: int
     retries: int
     retry_sleep: int
     cleanup_chunks: bool
@@ -86,39 +87,56 @@ class TTSResult:
 
 
 class KeyManager:
-    """Manages a pool of API keys for concurrent use and handles quota exhaustion."""
+    """Manages a pool of API key usage slots and handles quota exhaustion."""
 
-    def __init__(self, keys: List[str]):
-        self._available_keys = asyncio.Queue()
+    def __init__(self, keys: List[str], parallel_per_key: int):
+        self._available_slots = asyncio.Queue()
         for key in keys:
-            self._available_keys.put_nowait(key)
+            for _ in range(parallel_per_key):
+                self._available_slots.put_nowait(key)
+
         self.initial_key_count = len(keys)
         self._exhausted_keys = set()
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> Optional[str]:
-        """Acquire an available API key, polling to avoid deadlocks if all keys get exhausted."""
+        """
+        Acquire an available API key usage slot.
+
+        If a key is pulled from the queue that has since been marked as exhausted,
+        it is discarded and another is requested, ensuring workers never use a bad key.
+        """
         while not self.all_exhausted():
             try:
-                # Wait for a short time to avoid blocking forever
-                key = await asyncio.wait_for(self._available_keys.get(), timeout=1.0)
-                return key
+                # Wait for an available slot
+                key = await asyncio.wait_for(self._available_slots.get(), timeout=1.0)
+
+                # Atomically check if the acquired key is exhausted.
+                # If so, loop again to get a new key.
+                async with self._lock:
+                    if key in self._exhausted_keys:
+                        continue  # Discard and try again
+                    return key
             except asyncio.TimeoutError:
-                # Timed out, loop again to re-check all_exhausted status
+                # Timed out waiting for a key, loop to re-check all_exhausted status
                 continue
         return None
 
     async def release(self, key: str):
-        """Return an API key to the pool of available keys."""
-        await self._available_keys.put(key)
+        """
+        Return a key's usage slot to the pool, unless the key is exhausted.
+        """
+        async with self._lock:
+            if key not in self._exhausted_keys:
+                await self._available_slots.put(key)
 
     async def mark_exhausted(self, key: str):
-        """Permanently remove a key from rotation."""
+        """Permanently mark a key as exhausted, preventing its slots from being used or returned."""
         async with self._lock:
             self._exhausted_keys.add(key)
 
     def all_exhausted(self) -> bool:
-        """Check if all keys in the pool have been marked as exhausted."""
+        """Check if all unique API keys have been marked as exhausted."""
         return len(self._exhausted_keys) == self.initial_key_count
 
 
@@ -756,8 +774,10 @@ async def _process_chunk(
                     msg = f"Key ...{api_key[-4:]} is exhausted. Removing from pool."
                     _log(f"Chunk {chunk.index}: {msg}", 1, config.verbose)
                     await key_manager.mark_exhausted(api_key)
+                    # Do NOT release the key on quota failure.
                 else:
-                    await key_manager.release(api_key)  # Return key on non-quota errors
+                    # Return key on other transient errors for retry
+                    await key_manager.release(api_key)
 
                 error_msg = f"Attempt {attempt + 1}/{config.retries} failed: {e}"
                 _log(f"Chunk {chunk.index}: {error_msg}", 2, config.verbose)
@@ -787,7 +807,7 @@ async def run_tts_pipeline(
     try:
         # Initialize one client per key
         clients = {key: genai.Client(api_key=key) for key in config.api_keys}
-        key_manager = KeyManager(config.api_keys)
+        key_manager = KeyManager(config.api_keys, config.parallel_per_key)
         # Use the first client for initial setup tasks like token counting
         initial_client = next(iter(clients.values()))
 
@@ -886,7 +906,7 @@ async def run_tts_pipeline(
             )
 
         _log(
-            f"Processing {len(chunks)} chunks with {config.parallel} parallel requests",
+            f"Processing {len(chunks)} chunks with {config.parallel} parallel requests ({config.parallel_per_key} per key)",
             1,
             config.verbose,
         )
