@@ -62,8 +62,8 @@ Examples:
     parser.add_argument(
         "--parallel",
         type=int,
-        default=5,
-        help="Number of parallel API calls to make. (Default: 5)",
+        default=1,
+        help="Number of parallel API calls to make. (Default: 1)",
     )
     parser.add_argument(
         "--retries",

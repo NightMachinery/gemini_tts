@@ -140,39 +140,55 @@ async def _chunk_text(
 ) -> List[str]:
     """Breaks text into chunks using a tokenizer, preferring speaker boundaries."""
     chunks: List[str] = []
-    current_chunk_lines: List[str] = []
+    lines = text.split("\n")
+    current_line_idx = 0
+    
     speaker_line_regex = re.compile(
         f"^({'|'.join(re.escape(s) for s in speakers)}):", re.MULTILINE
-    )
+    ) if speakers else None
 
-    for line in text.split("\n"):
-        potential_chunk_text = "\n".join(current_chunk_lines + [line])
-        token_count_result = await client.aio.models.count_tokens(
-            model=model, contents=potential_chunk_text
-        )
-        token_count = token_count_result.total_tokens
-
-        is_speaker_line = bool(speaker_line_regex.match(line))
-        is_full = token_count > max_tokens
-
-        if current_chunk_lines and (is_speaker_line or is_full):
-            chunk_text = "\n".join(current_chunk_lines)
+    while current_line_idx < len(lines):
+        # Start with a single line and expand until we hit the token limit
+        chunk_lines = [lines[current_line_idx]]
+        end_idx = current_line_idx + 1
+        
+        # Expand chunk until we hit token limit
+        while end_idx < len(lines):
+            potential_chunk = "\n".join(chunk_lines + [lines[end_idx]])
+            token_count_result = await client.aio.models.count_tokens(
+                model=model, contents=potential_chunk
+            )
+            
+            if token_count_result.total_tokens > max_tokens:
+                break
+                
+            chunk_lines.append(lines[end_idx])
+            end_idx += 1
+        
+        # If we have more than one line and speaker detection is enabled,
+        # try to find a better breaking point by searching backward for speaker lines
+        if len(chunk_lines) > 1 and speaker_line_regex and end_idx < len(lines):
+            # Search backward from the end for the last speaker line
+            for i in range(len(chunk_lines) - 1, 0, -1):  # Don't include first line in search
+                if speaker_line_regex.match(chunk_lines[i]):
+                    # Found a speaker line, split here
+                    speaker_line = chunk_lines[i]
+                    chunk_lines = chunk_lines[:i]
+                    end_idx = current_line_idx + i
+                    _log(f"Adjusted chunk boundary at speaker line: '{speaker_line[:50]}...'", 3, verbose)
+                    break
+        
+        chunk_text = "\n".join(chunk_lines)
+        if chunk_text.strip():
             chunks.append(chunk_text)
-            _log(f"Created chunk {len(chunks)} with {token_count} tokens", 3, verbose)
-            current_chunk_lines = [line]
-        else:
-            current_chunk_lines.append(line)
+            # Get actual token count for logging
+            final_token_result = await client.aio.models.count_tokens(model=model, contents=chunk_text)
+            _log(f"Created chunk {len(chunks)} with {final_token_result.total_tokens} tokens", 3, verbose)
+        
+        current_line_idx = end_idx
 
-    if current_chunk_lines:
-        chunk_text = "\n".join(current_chunk_lines)
-        chunks.append(chunk_text)
-        # Get final chunk token count
-        final_token_result = await client.aio.models.count_tokens(model=model, contents=chunk_text)
-        _log(f"Created final chunk {len(chunks)} with {final_token_result.total_tokens} tokens", 3, verbose)
-
-    result_chunks = [chunk for chunk in chunks if chunk.strip()]
-    _log(f"Chunking complete: {len(result_chunks)} total chunks", 2, verbose)
-    return result_chunks
+    _log(f"Chunking complete: {len(chunks)} total chunks", 2, verbose)
+    return chunks
 
 
 # --- Audio and File Handling ---
@@ -304,10 +320,12 @@ async def _process_chunk(
 ):
     """Processes a single text chunk, handling caching, API calls, and retries."""
     async with semaphore:
-        if chunk.text_path.exists() and chunk.audio_path.exists():
+        if chunk.audio_path.exists():
+            # Check if the cached text matches current text (chunk.text_path should already exist)
             try:
                 async with aiofiles.open(chunk.text_path, "r", encoding="utf-8") as f:
-                    if await f.read() == chunk.text:
+                    cached_text = await f.read()
+                    if cached_text == chunk.text:
                         chunk.status = "skipped"
                         _log(f"Chunk {chunk.index}: Using cached audio", 3, config.verbose)
                         progress_bar.update(1)
@@ -315,8 +333,11 @@ async def _process_chunk(
             except IOError:
                 pass  # File is unreadable, proceed to regenerate.
 
-        async with aiofiles.open(chunk.text_path, "w", encoding="utf-8") as f:
-            await f.write(chunk.text)
+        # Text chunk should already be saved, but verify it exists
+        if not chunk.text_path.exists():
+            _log(f"Chunk {chunk.index}: Text file missing, recreating", 2, config.verbose)
+            async with aiofiles.open(chunk.text_path, "w", encoding="utf-8") as f:
+                await f.write(chunk.text)
 
         speech_config = _build_speech_config(
             no_speakers=config.no_speakers, speaker_voice_map=speaker_voice_map
@@ -410,16 +431,23 @@ async def run_tts_pipeline(
 
         chunks = []
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save all text chunks before beginning TTS
+        _log("Saving all text chunks to disk...", 1, config.verbose)
         for i, text_chunk in enumerate(text_chunks):
             base_name = f"{out_path.stem}_{i}"
-            chunks.append(
-                Chunk(
-                    index=i,
-                    text=text_chunk,
-                    text_path=out_path.parent / f"tmp_{base_name}.md",
-                    audio_path=out_path.parent / f"{base_name}.wav",
-                )
+            chunk = Chunk(
+                index=i,
+                text=text_chunk,
+                text_path=out_path.parent / f"tmp_{base_name}.md",
+                audio_path=out_path.parent / f"{base_name}.wav",
             )
+            chunks.append(chunk)
+            
+            # Save the text chunk to disk immediately
+            async with aiofiles.open(chunk.text_path, 'w', encoding='utf-8') as f:
+                await f.write(text_chunk)
+            _log(f"Saved chunk {i+1}/{len(text_chunks)}: {chunk.text_path}", 2, config.verbose)
 
         _log(f"Processing {len(chunks)} chunks with {config.parallel} parallel requests", 1, config.verbose)
         _log(f"Configuration: max_tokens_per_chunk={config.max_chunk_tokens}, retries={config.retries}, retry_sleep={config.retry_sleep}s", 2, config.verbose)
