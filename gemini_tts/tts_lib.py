@@ -90,6 +90,30 @@ def _log(message: str, level: int, config_verbose: int):
         #: `[Verbosity: {level}] `
 
 
+def _is_quota_exhausted_error(e: Exception) -> bool:
+    """Best-effort check to detect Gemini quota exhaustion errors.
+
+    We avoid tight coupling to the client exception types by matching against
+    common markers present in the returned error payloads.
+    """
+    try:
+        s = str(e)
+    except Exception:
+        return False
+
+    s_low = s.lower()
+    # Match common indicators seen in Gemini quota errors
+    if (
+        "resource_exhausted" in s_low
+        or "quotafailure" in s_low
+        or "exceeded your current quota" in s_low
+        or "quotaid" in s_low
+        or "quotametric" in s_low
+    ):
+        return True
+    return False
+
+
 def _generate_content_hash(text: str, speaker_voice_map: Optional[Dict[str, str]] = None, include_voices: bool = True) -> str:
     """Generate SHA-256 hash of normalized text content, optionally including speaker-voice mapping."""
     # Normalize whitespace to ensure consistent hashing
@@ -547,6 +571,7 @@ async def _process_chunk(
     config: TTSConfig,
     client,
     speaker_voice_map: Dict[str, str],
+    quota_event: Optional[asyncio.Event] = None,
 ):
     """Processes a single text chunk, handling caching, API calls, and retries."""
     async with semaphore:
@@ -608,6 +633,19 @@ async def _process_chunk(
                 _log(f"Chunk {chunk.index}: Generated audio with metadata (hash: {chunk.content_hash[:12]}): {chunk.audio_path}", 2, config.verbose)
                 break
             except Exception as e:
+                # Do not retry on quota exhaustion; fail immediately with a clear message
+                if _is_quota_exhausted_error(e):
+                    msg = (
+                        "Quota exhausted: The Gemini API reported RESOURCE_EXHAUSTED. "
+                        "No retries were attempted. See https://ai.google.dev/gemini-api/docs/rate-limits"
+                    )
+                    _log(f"Chunk {chunk.index}: {msg}", 1, config.verbose)
+                    chunk.status = "failed"
+                    chunk.error_message = f"{msg}. Original error: {e}"
+                    if quota_event is not None:
+                        quota_event.set()
+                    break
+
                 error_msg = f"Attempt {attempt + 1}/{config.retries} failed: {e}"
                 _log(f"Chunk {chunk.index}: {error_msg}", 2, config.verbose)
                 if attempt < config.retries - 1:
@@ -714,18 +752,41 @@ async def run_tts_pipeline(
         semaphore = asyncio.Semaphore(config.parallel)
         progress = tqdm(total=len(chunks), desc="Generating Audio Chunks")
 
-        tasks = [
-            _process_chunk(
-                c,
-                progress_bar=progress,
-                semaphore=semaphore,
-                config=config,
-                client=client,
-                speaker_voice_map=speaker_voice_map,
+        # Process chunks with controlled concurrency. If quota gets exhausted, stop
+        # scheduling new chunks but let in-flight tasks finish.
+        quota_event = asyncio.Event()
+
+        async def start_task(c: Chunk):
+            return asyncio.create_task(
+                _process_chunk(
+                    c,
+                    progress_bar=progress,
+                    semaphore=semaphore,
+                    config=config,
+                    client=client,
+                    speaker_voice_map=speaker_voice_map,
+                    quota_event=quota_event,
+                )
             )
-            for c in chunks
-        ]
-        await asyncio.gather(*tasks)
+
+        idx = 0
+        running: Set[asyncio.Task] = set()
+
+        # Prime up to 'parallel' tasks
+        while idx < len(chunks) and len(running) < config.parallel and not quota_event.is_set():
+            running.add(await start_task(chunks[idx]))
+            idx += 1
+
+        # As tasks finish, schedule next unless quota is exhausted
+        while running:
+            done, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+            # Schedule more to maintain concurrency if allowed
+            while idx < len(chunks) and len(running) < config.parallel and not quota_event.is_set():
+                running.add(await start_task(chunks[idx]))
+                idx += 1
+
+        if quota_event.is_set():
+            _log("Quota exhausted detected. Stopped scheduling new chunks; waited for in-flight tasks to finish.", 1, config.verbose)
         progress.close()
 
         result = TTSResult(chunks=chunks)
@@ -749,6 +810,15 @@ async def run_tts_pipeline(
 
         return result
     except Exception as e:
+        if _is_quota_exhausted_error(e):
+            return TTSResult(
+                chunks=[],
+                success=False,
+                message=(
+                    "Quota exhausted: The Gemini API reported RESOURCE_EXHAUSTED. "
+                    "No retries were attempted. See https://ai.google.dev/gemini-api/docs/rate-limits"
+                ),
+            )
         return TTSResult(
             chunks=[], success=False, message=f"An unexpected error occurred: {e}"
         )
