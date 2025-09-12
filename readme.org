@@ -1,0 +1,3 @@
+#+TITLE: gemini_tts
+
+Convert long documents into audio files using the Gemini TTS API, with support for multi-speaker inputs (e.g., podcast scripts).
