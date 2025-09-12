@@ -8,7 +8,7 @@ authors = [
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
-    "google-generativeai>=0.3.0",
+    "google-genai>=0.2.0",
     "aiofiles>=23.0.0",
     "tqdm>=4.64.0",
     "pynight",

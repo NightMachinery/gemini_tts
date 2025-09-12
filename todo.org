@@ -1,5 +1,7 @@
 #+TITLE: gemini_tts/todo
 
+* DONE If the output path contains dirs, create them if they don't exist
+
 * _
 #+BEGIN_SRC markdown
 I want you to develop a `gemini_tts.py input_path ... ` multi-speaker TTS (podcast script into audio) script that:
@@ -26,3 +28,4 @@ Any questions or ideas to further improve?
 #+BEGIN_SRC markdown
 Here are some example codes to help you get up-to-speed with the gemini tts api.
 #+END_SRC
+
