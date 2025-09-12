@@ -22,6 +22,7 @@ from pynight.common_gemini_tts import GEMINI_VOICES
 # Try to import offline tokenizer, fall back to online API if not available
 try:
     from vertexai.preview import tokenization
+
     OFFLINE_TOKENIZER_AVAILABLE = True
 except ImportError:
     OFFLINE_TOKENIZER_AVAILABLE = False
@@ -114,25 +115,31 @@ def _is_quota_exhausted_error(e: Exception) -> bool:
     return False
 
 
-def _generate_content_hash(text: str, speaker_voice_map: Optional[Dict[str, str]] = None, include_voices: bool = True) -> str:
+def _generate_content_hash(
+    text: str,
+    speaker_voice_map: Optional[Dict[str, str]] = None,
+    include_voices: bool = True,
+) -> str:
     """Generate SHA-256 hash of normalized text content, optionally including speaker-voice mapping."""
     # Normalize whitespace to ensure consistent hashing
-    normalized_text = re.sub(r'\s+', ' ', text.strip())
-    
+    normalized_text = re.sub(r"\s+", " ", text.strip())
+
     # Create hash input
     hash_input = normalized_text
-    
+
     # Include speaker-voice mapping in hash if requested
     if include_voices and speaker_voice_map:
         # Sort the mapping to ensure consistent ordering
         sorted_voices = sorted(speaker_voice_map.items())
-        voice_string = json.dumps(sorted_voices, separators=(',', ':'))
+        voice_string = json.dumps(sorted_voices, separators=(",", ":"))
         hash_input = f"{normalized_text}||VOICES:{voice_string}"
-    
-    return hashlib.sha256(hash_input.encode('utf-8')).hexdigest()
+
+    return hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
 
 
-def _create_chunk_metadata(content_hash: str, chunk_index: int, model: str, speakers: List[str]) -> dict:
+def _create_chunk_metadata(
+    content_hash: str, chunk_index: int, model: str, speakers: List[str]
+) -> dict:
     """Create metadata dictionary for WAV INFO chunk."""
     return {
         "content_hash": content_hash,
@@ -140,7 +147,7 @@ def _create_chunk_metadata(content_hash: str, chunk_index: int, model: str, spea
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "model": model,
         "speakers": speakers,
-        "version": "1.0"
+        "version": "1.0",
     }
 
 
@@ -154,7 +161,7 @@ def _create_tokenizer(model: str, verbose: int = 0):
             if "gemini-2.5-flash" in model or "flash" in model.lower():
                 model_name = "gemini-1.5-flash-002"  # Use latest 1.5 flash as proxy
             elif "gemini-2.5-pro" in model or "pro" in model.lower():
-                model_name = "gemini-1.5-pro-002"   # Use latest 1.5 pro as proxy
+                model_name = "gemini-1.5-pro-002"  # Use latest 1.5 pro as proxy
             elif "gemini-1.5-flash" in model:
                 model_name = "gemini-1.5-flash-002"
             elif "gemini-1.5-pro" in model:
@@ -164,16 +171,24 @@ def _create_tokenizer(model: str, verbose: int = 0):
             else:
                 # Default fallback
                 model_name = "gemini-1.5-flash-002"
-            
+
             tokenizer = tokenization.get_tokenizer_for_model(model_name)
             if model != model_name:
-                _log(f"Using offline tokenizer {model_name} as proxy for {model}", 2, verbose)
+                _log(
+                    f"Using offline tokenizer {model_name} as proxy for {model}",
+                    2,
+                    verbose,
+                )
             else:
                 _log(f"Using offline tokenizer for {model_name}", 2, verbose)
             return tokenizer, True
         except Exception as e:
-            _log(f"Failed to create offline tokenizer: {e}, falling back to online API", 1, verbose)
-    
+            _log(
+                f"Failed to create offline tokenizer: {e}, falling back to online API",
+                1,
+                verbose,
+            )
+
     _log("Using online API for token counting", 2, verbose)
     return None, False
 
@@ -237,7 +252,9 @@ def _determine_speakers(
         speakers = [
             speaker for speaker, _ in Counter(found_speakers).most_common(num_speakers)
         ]
-        _log(f"Automatically detected speakers: {speakers}", 1, 1)  # Always show speaker detection
+        _log(
+            f"Automatically detected speakers: {speakers}", 1, 1
+        )  # Always show speaker detection
     else:
         speakers = [part.strip() for part in speaker_config.split(",")]
 
@@ -253,20 +270,28 @@ def _determine_speakers(
 
 
 async def _chunk_text(
-    text: str, *, speakers: Set[str], max_tokens: int, client, model: str, verbose: int = 0
+    text: str,
+    *,
+    speakers: Set[str],
+    max_tokens: int,
+    client,
+    model: str,
+    verbose: int = 0,
 ) -> List[str]:
     """Breaks text into chunks using a tokenizer, preferring speaker boundaries."""
     chunks: List[str] = []
     lines = text.split("\n")
     current_line_idx = 0
-    
-    speaker_line_regex = re.compile(
-        f"^({'|'.join(re.escape(s) for s in speakers)}):", re.MULTILINE
-    ) if speakers else None
+
+    speaker_line_regex = (
+        re.compile(f"^({'|'.join(re.escape(s) for s in speakers)}):", re.MULTILINE)
+        if speakers
+        else None
+    )
 
     # Initialize tokenizer (offline if available, online as fallback)
     tokenizer, use_offline = _create_tokenizer(model, verbose)
-    
+
     # Count tokens function based on tokenizer type
     async def count_tokens(text: str) -> int:
         if use_offline:
@@ -281,7 +306,7 @@ async def _chunk_text(
         chunk_lines = [lines[current_line_idx]]
         current_chars = len(chunk_lines[0])
         end_idx = current_line_idx + 1
-        
+
         # If we have offline tokenizer, we can be more aggressive with expansion
         # Otherwise, use character-based estimation first
         if use_offline:
@@ -289,48 +314,54 @@ async def _chunk_text(
             while end_idx < len(lines):
                 potential_chunk = "\n".join(chunk_lines + [lines[end_idx]])
                 token_count = await count_tokens(potential_chunk)
-                
+
                 if token_count > max_tokens:
                     break
-                    
+
                 chunk_lines.append(lines[end_idx])
                 end_idx += 1
         else:
             # First, do a rough expansion based on character estimate
             while end_idx < len(lines):
                 line_chars = len(lines[end_idx]) + 1  # +1 for newline
-                estimated_tokens = (current_chars + line_chars) / CHARS_PER_TOKEN_ESTIMATE
-                
+                estimated_tokens = (
+                    current_chars + line_chars
+                ) / CHARS_PER_TOKEN_ESTIMATE
+
                 # If we're getting close to the limit, switch to precise token counting
                 if estimated_tokens > max_tokens * 0.8:  # Use 80% threshold for safety
                     break
-                    
+
                 chunk_lines.append(lines[end_idx])
                 current_chars += line_chars
                 end_idx += 1
-            
+
             # Now use binary search to find the exact boundary using token counting
-            if end_idx < len(lines):  # Only if we stopped due to token limit, not end of text
+            if end_idx < len(
+                lines
+            ):  # Only if we stopped due to token limit, not end of text
                 left = len(chunk_lines)  # We know this fits
-                right = min(len(lines) - current_line_idx, left + 50)  # Check up to 50 more lines
+                right = min(
+                    len(lines) - current_line_idx, left + 50
+                )  # Check up to 50 more lines
                 best_end = left
-                
+
                 while left <= right:
                     mid = (left + right) // 2
-                    test_lines = lines[current_line_idx:current_line_idx + mid]
+                    test_lines = lines[current_line_idx : current_line_idx + mid]
                     test_chunk = "\n".join(test_lines)
-                    
+
                     token_count = await count_tokens(test_chunk)
-                    
+
                     if token_count <= max_tokens:
                         best_end = mid
                         left = mid + 1
                     else:
                         right = mid - 1
-                
-                chunk_lines = lines[current_line_idx:current_line_idx + best_end]
+
+                chunk_lines = lines[current_line_idx : current_line_idx + best_end]
                 end_idx = current_line_idx + best_end
-        
+
         # If we have speaker detection, try to find a better breaking point
         if len(chunk_lines) > 1 and speaker_line_regex and end_idx < len(lines):
             # Search backward from the end for the last speaker line
@@ -340,19 +371,27 @@ async def _chunk_text(
                     speaker_line = chunk_lines[i]
                     chunk_lines = chunk_lines[:i]
                     end_idx = current_line_idx + i
-                    _log(f"Adjusted chunk boundary at speaker line: '{speaker_line[:50]}...'", 3, verbose)
+                    _log(
+                        f"Adjusted chunk boundary at speaker line: '{speaker_line[:50]}...'",
+                        3,
+                        verbose,
+                    )
                     break
-        
+
         chunk_text = "\n".join(chunk_lines)
         if chunk_text.strip():
             chunks.append(chunk_text)
             # Get actual token count for final logging
             if verbose >= 3:
                 final_token_count = await count_tokens(chunk_text)
-                _log(f"Created chunk {len(chunks)} with {final_token_count} tokens", 3, verbose)
+                _log(
+                    f"Created chunk {len(chunks)} with {final_token_count} tokens",
+                    3,
+                    verbose,
+                )
             else:
                 _log(f"Created chunk {len(chunks)}", 2, verbose)
-        
+
         current_line_idx = end_idx
 
     _log(f"Chunking complete: {len(chunks)} total chunks", 2, verbose)
@@ -369,24 +408,24 @@ def _convert_to_wav(audio_data: bytes, metadata: Optional[dict] = None) -> bytes
     bytes_per_sample = bits_per_sample // 8
     block_align = num_channels * bytes_per_sample
     byte_rate = sample_rate * block_align
-    
+
     # Create INFO chunk with metadata if provided
     info_chunk = b""
     if metadata:
         # Create ICMT (comment) subchunk with JSON metadata
-        comment_text = json.dumps(metadata, separators=(',', ':'))
-        comment_bytes = comment_text.encode('utf-8')
+        comment_text = json.dumps(metadata, separators=(",", ":"))
+        comment_bytes = comment_text.encode("utf-8")
         # Pad to even length
         if len(comment_bytes) % 2:
-            comment_bytes += b'\0'
-        
+            comment_bytes += b"\0"
+
         # ICMT subchunk: ID + size + data
         icmt_chunk = b"ICMT" + struct.pack("<I", len(comment_bytes)) + comment_bytes
-        
+
         # LIST INFO chunk: LIST + size + INFO + subchunks
         list_size = 4 + len(icmt_chunk)  # 4 bytes for "INFO" + subchunks
         info_chunk = b"LIST" + struct.pack("<I", list_size) + b"INFO" + icmt_chunk
-    
+
     # Calculate total file size
     chunk_size = 36 + data_size + len(info_chunk)
 
@@ -407,32 +446,36 @@ def _convert_to_wav(audio_data: bytes, metadata: Optional[dict] = None) -> bytes
         b"data",
         data_size,
     )
-    
+
     return header + audio_data + info_chunk
 
 
 def _read_wav_metadata(file_path: Path) -> Optional[dict]:
     """Read metadata from WAV file INFO chunk."""
     try:
-        with open(file_path, 'rb') as f:
+        with open(file_path, "rb") as f:
             # Read RIFF header
             riff_header = f.read(12)
-            if len(riff_header) < 12 or riff_header[:4] != b'RIFF' or riff_header[8:12] != b'WAVE':
+            if (
+                len(riff_header) < 12
+                or riff_header[:4] != b"RIFF"
+                or riff_header[8:12] != b"WAVE"
+            ):
                 return None
-            
+
             # Skip fmt chunk and data chunk to find LIST INFO
             while True:
                 chunk_header = f.read(8)
                 if len(chunk_header) < 8:
                     break
-                    
+
                 chunk_id = chunk_header[:4]
-                chunk_size = struct.unpack('<I', chunk_header[4:8])[0]
-                
-                if chunk_id == b'LIST':
+                chunk_size = struct.unpack("<I", chunk_header[4:8])[0]
+
+                if chunk_id == b"LIST":
                     # Check if this is an INFO chunk
                     list_type = f.read(4)
-                    if list_type == b'INFO':
+                    if list_type == b"INFO":
                         # Read INFO subchunks
                         remaining = chunk_size - 4
                         while remaining > 0:
@@ -440,21 +483,23 @@ def _read_wav_metadata(file_path: Path) -> Optional[dict]:
                                 break
                             subchunk_header = f.read(8)
                             subchunk_id = subchunk_header[:4]
-                            subchunk_size = struct.unpack('<I', subchunk_header[4:8])[0]
-                            
-                            if subchunk_id == b'ICMT':
+                            subchunk_size = struct.unpack("<I", subchunk_header[4:8])[0]
+
+                            if subchunk_id == b"ICMT":
                                 # Read comment data
                                 comment_data = f.read(subchunk_size)
                                 try:
                                     # Remove null padding and decode
-                                    comment_text = comment_data.rstrip(b'\0').decode('utf-8')
+                                    comment_text = comment_data.rstrip(b"\0").decode(
+                                        "utf-8"
+                                    )
                                     return json.loads(comment_text)
                                 except (json.JSONDecodeError, UnicodeDecodeError):
                                     return None
                             else:
                                 # Skip other subchunks
                                 f.seek(subchunk_size, 1)
-                            
+
                             remaining -= 8 + subchunk_size
                             # Pad to even boundary
                             if subchunk_size % 2:
@@ -470,17 +515,23 @@ def _read_wav_metadata(file_path: Path) -> Optional[dict]:
                     # Pad to even boundary
                     if chunk_size % 2:
                         f.seek(1, 1)
-        
+
         return None
     except (IOError, struct.error):
         return None
 
 
-def _merge_audio_files(chunks: List[Chunk], *, final_path: Path, verbose: int = 0) -> bool:
+def _merge_audio_files(
+    chunks: List[Chunk], *, final_path: Path, verbose: int = 0
+) -> bool:
     """Merges all chunk .wav files into a single .mp3 file using ffmpeg."""
     _log("Merging audio chunks into final MP3 file...", 1, verbose)
     successful_chunks = [c for c in chunks if c.status == "success"]
-    _log(f"Merging {len(successful_chunks)} successful chunks into {final_path}", 2, verbose)
+    _log(
+        f"Merging {len(successful_chunks)} successful chunks into {final_path}",
+        2,
+        verbose,
+    )
     list_path = final_path.with_suffix(".txt")
     try:
         with open(list_path, "w", encoding="utf-8") as f:
@@ -578,21 +629,38 @@ async def _process_chunk(
         # Check if cached audio exists and has matching hash
         if chunk.audio_path.exists():
             cached_metadata = _read_wav_metadata(chunk.audio_path)
-            if cached_metadata and cached_metadata.get("content_hash") == chunk.content_hash:
+            if (
+                cached_metadata
+                and cached_metadata.get("content_hash") == chunk.content_hash
+            ):
                 chunk.status = "skipped"
-                _log(f"Chunk {chunk.index}: Using cached audio (hash: {chunk.content_hash[:12]})", 3, config.verbose)
+                _log(
+                    f"Chunk {chunk.index}: Using cached audio (hash: {chunk.content_hash[:12]})",
+                    3,
+                    config.verbose,
+                )
                 progress_bar.update(1)
                 return
             else:
                 if cached_metadata:
                     old_hash = cached_metadata.get("content_hash", "unknown")[:12]
-                    _log(f"Chunk {chunk.index}: Hash mismatch, regenerating (old: {old_hash}, new: {chunk.content_hash[:12]})", 2, config.verbose)
+                    _log(
+                        f"Chunk {chunk.index}: Hash mismatch, regenerating (old: {old_hash}, new: {chunk.content_hash[:12]})",
+                        2,
+                        config.verbose,
+                    )
                 else:
-                    _log(f"Chunk {chunk.index}: No metadata found, regenerating", 2, config.verbose)
+                    _log(
+                        f"Chunk {chunk.index}: No metadata found, regenerating",
+                        2,
+                        config.verbose,
+                    )
 
         # Text chunk should already be saved, but verify it exists
         if not chunk.text_path.exists():
-            _log(f"Chunk {chunk.index}: Text file missing, recreating", 2, config.verbose)
+            _log(
+                f"Chunk {chunk.index}: Text file missing, recreating", 2, config.verbose
+            )
             async with aiofiles.open(chunk.text_path, "w", encoding="utf-8") as f:
                 await f.write(chunk.text)
 
@@ -617,20 +685,24 @@ async def _process_chunk(
                     config=generation_config,
                 )
                 audio_data = response.candidates[0].content.parts[0].inline_data.data
-                
+
                 # Create metadata for WAV file
                 metadata = _create_chunk_metadata(
                     content_hash=chunk.content_hash,
                     chunk_index=chunk.index,
                     model=config.model,
-                    speakers=list(speaker_voice_map.keys())
+                    speakers=list(speaker_voice_map.keys()),
                 )
-                
+
                 wav_data = _convert_to_wav(audio_data, metadata)
                 async with aiofiles.open(chunk.audio_path, "wb") as f:
                     await f.write(wav_data)
                 chunk.status = "success"
-                _log(f"Chunk {chunk.index}: Generated audio with metadata (hash: {chunk.content_hash[:12]}): {chunk.audio_path}", 2, config.verbose)
+                _log(
+                    f"Chunk {chunk.index}: Generated audio with metadata (hash: {chunk.content_hash[:12]}): {chunk.audio_path}",
+                    2,
+                    config.verbose,
+                )
                 break
             except Exception as e:
                 # Do not retry on quota exhaustion; fail immediately with a clear message
@@ -674,9 +746,13 @@ async def run_tts_pipeline(
     try:
         client = genai.Client(api_key=api_key)
         _log(f"Initialized Gemini client with model: {config.model}", 1, config.verbose)
-        
+
         full_text = _read_and_join_files(input_paths)
-        _log(f"Read {len(input_paths)} input file(s), total characters: {len(full_text)}", 1, config.verbose)
+        _log(
+            f"Read {len(input_paths)} input file(s), total characters: {len(full_text)}",
+            1,
+            config.verbose,
+        )
         speaker_voice_map, all_speakers = {}, set()
         if config.speakers_enabled:
             speaker_voice_map, all_speakers = _determine_speakers(
@@ -684,7 +760,7 @@ async def run_tts_pipeline(
             )
 
         _log("Chunking text based on token limits...", 1, config.verbose)
-        
+
         # Get total token count before chunking
         tokenizer, use_offline = _create_tokenizer(config.model, config.verbose)
         if use_offline:
@@ -695,7 +771,7 @@ async def run_tts_pipeline(
             )
             total_tokens = total_token_result.total_tokens
         _log(f"Total input tokens: {total_tokens}", 1, config.verbose)
-        
+
         text_chunks = await _chunk_text(
             full_text,
             speakers=all_speakers,
@@ -710,29 +786,37 @@ async def run_tts_pipeline(
                 success=False,
                 message="No text chunks could be created from input.",
             )
-        
-        _log(f"Created {len(text_chunks)} chunks (max {config.max_chunk_tokens} tokens each)", 1, config.verbose)
+
+        _log(
+            f"Created {len(text_chunks)} chunks (max {config.max_chunk_tokens} tokens each)",
+            1,
+            config.verbose,
+        )
 
         chunks = []
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Save all text chunks before beginning TTS and generate hashes
-        _log("Saving all text chunks to disk and generating content hashes...", 1, config.verbose)
+        _log(
+            "Saving all text chunks to disk and generating content hashes...",
+            1,
+            config.verbose,
+        )
         for i, text_chunk in enumerate(text_chunks):
             base_name = f"{out_path.stem}_{i}"
             content_hash = _generate_content_hash(
-                text_chunk, 
-                speaker_voice_map if config.hash_voices else None, 
-                config.hash_voices
+                text_chunk,
+                speaker_voice_map if config.hash_voices else None,
+                config.hash_voices,
             )
-            
+
             # Generate filename with optional hash
             if config.chunk_filename_include_hash:
                 hash_suffix = f"_{content_hash[:8]}"
                 audio_filename = f"{base_name}{hash_suffix}.wav"
             else:
                 audio_filename = f"{base_name}.wav"
-            
+
             chunk = Chunk(
                 index=i,
                 text=text_chunk,
@@ -741,14 +825,26 @@ async def run_tts_pipeline(
                 content_hash=content_hash,
             )
             chunks.append(chunk)
-            
-            # Save the text chunk to disk immediately
-            async with aiofiles.open(chunk.text_path, 'w', encoding='utf-8') as f:
-                await f.write(text_chunk)
-            _log(f"Saved chunk {i+1}/{len(text_chunks)} (hash: {content_hash[:12]}): {chunk.text_path}", 2, config.verbose)
 
-        _log(f"Processing {len(chunks)} chunks with {config.parallel} parallel requests", 1, config.verbose)
-        _log(f"Configuration: max_tokens_per_chunk={config.max_chunk_tokens}, retries={config.retries}, retry_sleep={config.retry_sleep}s", 2, config.verbose)
+            # Save the text chunk to disk immediately
+            async with aiofiles.open(chunk.text_path, "w", encoding="utf-8") as f:
+                await f.write(text_chunk)
+            _log(
+                f"Saved chunk {i+1}/{len(text_chunks)} (hash: {content_hash[:12]}): {chunk.text_path}",
+                2,
+                config.verbose,
+            )
+
+        _log(
+            f"Processing {len(chunks)} chunks with {config.parallel} parallel requests",
+            1,
+            config.verbose,
+        )
+        _log(
+            f"Configuration: max_tokens_per_chunk={config.max_chunk_tokens}, retries={config.retries}, retry_sleep={config.retry_sleep}s",
+            2,
+            config.verbose,
+        )
         semaphore = asyncio.Semaphore(config.parallel)
         progress = tqdm(total=len(chunks), desc="Generating Audio Chunks")
 
@@ -773,20 +869,34 @@ async def run_tts_pipeline(
         running: Set[asyncio.Task] = set()
 
         # Prime up to 'parallel' tasks
-        while idx < len(chunks) and len(running) < config.parallel and not quota_event.is_set():
+        while (
+            idx < len(chunks)
+            and len(running) < config.parallel
+            and not quota_event.is_set()
+        ):
             running.add(await start_task(chunks[idx]))
             idx += 1
 
         # As tasks finish, schedule next unless quota is exhausted
         while running:
-            done, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+            done, running = await asyncio.wait(
+                running, return_when=asyncio.FIRST_COMPLETED
+            )
             # Schedule more to maintain concurrency if allowed
-            while idx < len(chunks) and len(running) < config.parallel and not quota_event.is_set():
+            while (
+                idx < len(chunks)
+                and len(running) < config.parallel
+                and not quota_event.is_set()
+            ):
                 running.add(await start_task(chunks[idx]))
                 idx += 1
 
         if quota_event.is_set():
-            _log("Quota exhausted detected. Stopped scheduling new chunks; waited for in-flight tasks to finish.", 1, config.verbose)
+            _log(
+                "Quota exhausted detected. Stopped scheduling new chunks; waited for in-flight tasks to finish.",
+                1,
+                config.verbose,
+            )
         progress.close()
 
         result = TTSResult(chunks=chunks)
@@ -799,7 +909,9 @@ async def run_tts_pipeline(
             return result
 
         final_mp3_path = out_path.with_suffix(".mp3")
-        if not _merge_audio_files(result.chunks, final_path=final_mp3_path, verbose=config.verbose):
+        if not _merge_audio_files(
+            result.chunks, final_path=final_mp3_path, verbose=config.verbose
+        ):
             result.success = False
             result.message = "Failed to merge audio chunks with ffmpeg."
             return result
