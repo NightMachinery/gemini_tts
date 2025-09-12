@@ -732,6 +732,9 @@ def _merge_audio_files(
     try:
         with open(list_path, "w", encoding="utf-8") as f:
             for chunk in mergeable_chunks:
+                # must have no single quotes
+                assert "'" not in str(chunk.audio_path.resolve()), f"Path contains single quote which breaks our quoting assumptions: {chunk.audio_path.resolve()}"
+
                 f.write(f"file '{chunk.audio_path.resolve()}'\n")
 
         command = [
