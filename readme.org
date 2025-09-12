@@ -70,7 +70,9 @@ If an existing chunk WAV’s embedded =content_hash= matches, it is reused (skip
   - =Host A: Hello!=
   - =Host B: Hi.=
 - Markdown-styled labels like =**Host A:**= are normalized before detection.
-- Provide one or more =.md=/=.txt= paths; contents are joined with a blank line.
+- Provide one or more =.md=/=.txt= paths.
+  - By default, each input file is treated as a chunk boundary: files are chunked independently and never merged across files.
+  - Disable this with =--no-files-as-chunk-boundary= to allow chunking across the concatenated content (joined with a blank line).
 
 * CLI Reference (selected)
 - =--max-chunk-tokens <int>=: max tokens per chunk (default 8000).
@@ -80,6 +82,7 @@ If an existing chunk WAV’s embedded =content_hash= matches, it is reused (skip
 - =--retries <int>= / =--retry-sleep <sec>=: transient error handling.
 - =--[no-]hash-voices=: include speaker→voice map in cache hash (default on).
 - =--[no-]chunk-filename-include-hash=: add 8-char hash to WAV filenames (default on).
+- =--[no-]files-as-chunk-boundary=: treat each input file as a chunk boundary (default on).
 - =-v/-vv/-vvv=: increase verbosity.
 
 Notes:
@@ -99,6 +102,7 @@ config = TTSConfig(
     speakers_enabled=True,
     hash_voices=True,
     chunk_filename_include_hash=True,
+    files_as_chunk_boundary=True,
     parallel=2,
     retries=3,
     retry_sleep=65,

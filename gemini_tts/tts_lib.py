@@ -48,6 +48,7 @@ class TTSConfig:
     speakers_enabled: bool
     hash_voices: bool
     chunk_filename_include_hash: bool
+    files_as_chunk_boundary: bool
     parallel: int
     parallel_per_key: int
     retries: int
@@ -275,6 +276,19 @@ def _read_and_join_files(input_paths: List[Path]) -> str:
             raise FileNotFoundError(f"Input path is not a file: {path}")
         contents.append(path.read_text(encoding="utf-8"))
     return "\n\n".join(contents)
+
+
+def _read_files(input_paths: List[Path]) -> List[str]:
+    """Reads content from all input files individually.
+
+    Returns a list of file contents in the same order as input_paths.
+    """
+    contents: List[str] = []
+    for path in input_paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"Input path is not a file: {path}")
+        contents.append(path.read_text(encoding="utf-8"))
+    return contents
 
 
 def _normalize_speaker_labels(text: str) -> str:
@@ -834,7 +848,9 @@ async def run_tts_pipeline(
             config.verbose,
         )
 
-        full_text = _read_and_join_files(input_paths)
+        # Read all files and also create a joined string for global operations
+        file_texts = _read_files(input_paths)
+        full_text = "\n\n".join(file_texts)
         _log(
             f"Read {len(input_paths)} input file(s), total characters: {len(full_text)}",
             1,
@@ -859,14 +875,39 @@ async def run_tts_pipeline(
             total_tokens = total_token_result.total_tokens
         _log(f"Total input tokens: {total_tokens}", 1, config.verbose)
 
-        text_chunks = await _chunk_text(
-            full_text,
-            speakers=all_speakers,
-            max_tokens=config.max_chunk_tokens,
-            client=initial_client,
-            model=config.model,
-            verbose=config.verbose,
-        )
+        # Chunking: optionally respect file boundaries for more semantic grouping
+        text_chunks: List[str] = []
+        if config.files_as_chunk_boundary and len(input_paths) > 1:
+            _log(
+                "Chunking each input file independently (file boundaries as chunk boundaries)",
+                1,
+                config.verbose,
+            )
+            for idx, file_text in enumerate(file_texts, start=1):
+                _log(f"Chunking file {idx}/{len(file_texts)}...", 2, config.verbose)
+                per_file_chunks = await _chunk_text(
+                    file_text,
+                    speakers=all_speakers,
+                    max_tokens=config.max_chunk_tokens,
+                    client=initial_client,
+                    model=config.model,
+                    verbose=config.verbose,
+                )
+                _log(
+                    f"File {idx} produced {len(per_file_chunks)} chunk(s)",
+                    2,
+                    config.verbose,
+                )
+                text_chunks.extend(per_file_chunks)
+        else:
+            text_chunks = await _chunk_text(
+                full_text,
+                speakers=all_speakers,
+                max_tokens=config.max_chunk_tokens,
+                client=initial_client,
+                model=config.model,
+                verbose=config.verbose,
+            )
         if not text_chunks:
             return TTSResult(
                 chunks=[],

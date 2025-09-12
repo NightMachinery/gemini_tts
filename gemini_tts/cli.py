@@ -91,6 +91,16 @@ Examples:
         help="Include 8-char hash in chunk filenames for easy identification. Use --no-chunk-filename-include-hash to disable.",
     )
     parser.add_argument(
+        "--files-as-chunk-boundary",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When multiple input files are provided, treat each file as a chunk boundary. "
+            "Each file is chunked independently (further split if too large). "
+            "Use --no-files-as-chunk-boundary to disable."
+        ),
+    )
+    parser.add_argument(
         "--parallel",
         type=str,
         default="auto",
@@ -192,6 +202,7 @@ Examples:
         speakers_enabled=args.multi_speakers_p,
         hash_voices=args.hash_voices,
         chunk_filename_include_hash=args.chunk_filename_include_hash,
+        files_as_chunk_boundary=args.files_as_chunk_boundary,
         parallel=parallel_count,
         parallel_per_key=args.parallel_per_key,
         retries=args.retries,
