@@ -1,6 +1,10 @@
 #+TITLE: gemini_tts/private_readme
 
-* _
+* Usage Examples
 #+begin_src zsh :eval never
 GEMINI_API_KEY=$gemini_api_key pxa98 gemini-tts -vvv examples/Civ_Avoidance_ACT_6_Opus4T.md -o tmp/civ_6
+#+end_src
+
+#+begin_src zsh :eval never
+GEMINI_API_KEY=$gemini_api_key pxa98 reval-ec gemini-tts -vvv "$(p)" -o tmp/boundaries_"${$(p):t:r}"
 #+end_src
