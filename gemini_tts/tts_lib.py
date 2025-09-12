@@ -1063,7 +1063,7 @@ async def run_tts_pipeline(
             async with aiofiles.open(chunk.text_path, "w", encoding="utf-8") as f:
                 await f.write(text_chunk)
             _log(
-                f"Saved chunk {i+1}/{len(text_chunks)} (hash: {content_hash[:12]}): {chunk.text_path}",
+                f"Saved chunk {i} ({i+1}/{len(text_chunks)}) (hash: {content_hash[:12]}): {chunk.text_path}",
                 2,
                 config.verbose,
             )
