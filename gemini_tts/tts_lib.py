@@ -1,12 +1,15 @@
 from pynight.common_icecream import ic
 
 import asyncio
+import hashlib
+import json
 import os
 import re
 import struct
 import subprocess
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -24,6 +27,9 @@ except ImportError:
     OFFLINE_TOKENIZER_AVAILABLE = False
     tokenization = None
 
+#: Force online usage, as the offline tokenizers only support old models and their counts are widely inaccurate.
+OFFLINE_TOKENIZER_AVAILABLE = False
+
 # A selection of diverse voices for automatic speaker assignment
 DEFAULT_VOICES = list(GEMINI_VOICES.keys())
 
@@ -37,7 +43,9 @@ class TTSConfig:
     model: str
     max_chunk_tokens: int
     speakers: str
-    no_speakers: bool
+    speakers_enabled: bool
+    hash_voices: bool
+    chunk_filename_include_hash: bool
     parallel: int
     retries: int
     retry_sleep: int
@@ -53,6 +61,7 @@ class Chunk:
     text: str
     text_path: Path
     audio_path: Path
+    content_hash: str
     status: str = "pending"
     error_message: Optional[str] = None
 
@@ -77,7 +86,38 @@ class TTSResult:
 def _log(message: str, level: int, config_verbose: int):
     """Log a message if the verbosity level is high enough."""
     if config_verbose >= level:
-        print(f"[V{level}] {message}")
+        print(f"{message}")
+        #: `[Verbosity: {level}] `
+
+
+def _generate_content_hash(text: str, speaker_voice_map: Optional[Dict[str, str]] = None, include_voices: bool = True) -> str:
+    """Generate SHA-256 hash of normalized text content, optionally including speaker-voice mapping."""
+    # Normalize whitespace to ensure consistent hashing
+    normalized_text = re.sub(r'\s+', ' ', text.strip())
+    
+    # Create hash input
+    hash_input = normalized_text
+    
+    # Include speaker-voice mapping in hash if requested
+    if include_voices and speaker_voice_map:
+        # Sort the mapping to ensure consistent ordering
+        sorted_voices = sorted(speaker_voice_map.items())
+        voice_string = json.dumps(sorted_voices, separators=(',', ':'))
+        hash_input = f"{normalized_text}||VOICES:{voice_string}"
+    
+    return hashlib.sha256(hash_input.encode('utf-8')).hexdigest()
+
+
+def _create_chunk_metadata(content_hash: str, chunk_index: int, model: str, speakers: List[str]) -> dict:
+    """Create metadata dictionary for WAV INFO chunk."""
+    return {
+        "content_hash": content_hash,
+        "chunk_index": chunk_index,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "model": model,
+        "speakers": speakers,
+        "version": "1.0"
+    }
 
 
 def _create_tokenizer(model: str, verbose: int = 0):
@@ -298,15 +338,35 @@ async def _chunk_text(
 # --- Audio and File Handling ---
 
 
-def _convert_to_wav(audio_data: bytes) -> bytes:
-    """Generates a valid WAV file header for raw L16 audio data from the API."""
+def _convert_to_wav(audio_data: bytes, metadata: Optional[dict] = None) -> bytes:
+    """Generates a valid WAV file with optional metadata for raw L16 audio data from the API."""
     bits_per_sample, sample_rate, num_channels = 16, 24000, 1
     data_size = len(audio_data)
     bytes_per_sample = bits_per_sample // 8
     block_align = num_channels * bytes_per_sample
     byte_rate = sample_rate * block_align
-    chunk_size = 36 + data_size
+    
+    # Create INFO chunk with metadata if provided
+    info_chunk = b""
+    if metadata:
+        # Create ICMT (comment) subchunk with JSON metadata
+        comment_text = json.dumps(metadata, separators=(',', ':'))
+        comment_bytes = comment_text.encode('utf-8')
+        # Pad to even length
+        if len(comment_bytes) % 2:
+            comment_bytes += b'\0'
+        
+        # ICMT subchunk: ID + size + data
+        icmt_chunk = b"ICMT" + struct.pack("<I", len(comment_bytes)) + comment_bytes
+        
+        # LIST INFO chunk: LIST + size + INFO + subchunks
+        list_size = 4 + len(icmt_chunk)  # 4 bytes for "INFO" + subchunks
+        info_chunk = b"LIST" + struct.pack("<I", list_size) + b"INFO" + icmt_chunk
+    
+    # Calculate total file size
+    chunk_size = 36 + data_size + len(info_chunk)
 
+    # Main WAV header
     header = struct.pack(
         "<4sI4s4sIHHIIHH4sI",
         b"RIFF",
@@ -323,7 +383,73 @@ def _convert_to_wav(audio_data: bytes) -> bytes:
         b"data",
         data_size,
     )
-    return header + audio_data
+    
+    return header + audio_data + info_chunk
+
+
+def _read_wav_metadata(file_path: Path) -> Optional[dict]:
+    """Read metadata from WAV file INFO chunk."""
+    try:
+        with open(file_path, 'rb') as f:
+            # Read RIFF header
+            riff_header = f.read(12)
+            if len(riff_header) < 12 or riff_header[:4] != b'RIFF' or riff_header[8:12] != b'WAVE':
+                return None
+            
+            # Skip fmt chunk and data chunk to find LIST INFO
+            while True:
+                chunk_header = f.read(8)
+                if len(chunk_header) < 8:
+                    break
+                    
+                chunk_id = chunk_header[:4]
+                chunk_size = struct.unpack('<I', chunk_header[4:8])[0]
+                
+                if chunk_id == b'LIST':
+                    # Check if this is an INFO chunk
+                    list_type = f.read(4)
+                    if list_type == b'INFO':
+                        # Read INFO subchunks
+                        remaining = chunk_size - 4
+                        while remaining > 0:
+                            if remaining < 8:
+                                break
+                            subchunk_header = f.read(8)
+                            subchunk_id = subchunk_header[:4]
+                            subchunk_size = struct.unpack('<I', subchunk_header[4:8])[0]
+                            
+                            if subchunk_id == b'ICMT':
+                                # Read comment data
+                                comment_data = f.read(subchunk_size)
+                                try:
+                                    # Remove null padding and decode
+                                    comment_text = comment_data.rstrip(b'\0').decode('utf-8')
+                                    return json.loads(comment_text)
+                                except (json.JSONDecodeError, UnicodeDecodeError):
+                                    return None
+                            else:
+                                # Skip other subchunks
+                                f.seek(subchunk_size, 1)
+                            
+                            remaining -= 8 + subchunk_size
+                            # Pad to even boundary
+                            if subchunk_size % 2:
+                                f.seek(1, 1)
+                                remaining -= 1
+                        break
+                    else:
+                        # Skip non-INFO LIST chunk
+                        f.seek(chunk_size - 4, 1)
+                else:
+                    # Skip other chunks
+                    f.seek(chunk_size, 1)
+                    # Pad to even boundary
+                    if chunk_size % 2:
+                        f.seek(1, 1)
+        
+        return None
+    except (IOError, struct.error):
+        return None
 
 
 def _merge_audio_files(chunks: List[Chunk], *, final_path: Path, verbose: int = 0) -> bool:
@@ -424,18 +550,20 @@ async def _process_chunk(
 ):
     """Processes a single text chunk, handling caching, API calls, and retries."""
     async with semaphore:
+        # Check if cached audio exists and has matching hash
         if chunk.audio_path.exists():
-            # Check if the cached text matches current text (chunk.text_path should already exist)
-            try:
-                async with aiofiles.open(chunk.text_path, "r", encoding="utf-8") as f:
-                    cached_text = await f.read()
-                    if cached_text == chunk.text:
-                        chunk.status = "skipped"
-                        _log(f"Chunk {chunk.index}: Using cached audio", 3, config.verbose)
-                        progress_bar.update(1)
-                        return
-            except IOError:
-                pass  # File is unreadable, proceed to regenerate.
+            cached_metadata = _read_wav_metadata(chunk.audio_path)
+            if cached_metadata and cached_metadata.get("content_hash") == chunk.content_hash:
+                chunk.status = "skipped"
+                _log(f"Chunk {chunk.index}: Using cached audio (hash: {chunk.content_hash[:12]})", 3, config.verbose)
+                progress_bar.update(1)
+                return
+            else:
+                if cached_metadata:
+                    old_hash = cached_metadata.get("content_hash", "unknown")[:12]
+                    _log(f"Chunk {chunk.index}: Hash mismatch, regenerating (old: {old_hash}, new: {chunk.content_hash[:12]})", 2, config.verbose)
+                else:
+                    _log(f"Chunk {chunk.index}: No metadata found, regenerating", 2, config.verbose)
 
         # Text chunk should already be saved, but verify it exists
         if not chunk.text_path.exists():
@@ -444,7 +572,7 @@ async def _process_chunk(
                 await f.write(chunk.text)
 
         speech_config = _build_speech_config(
-            no_speakers=config.no_speakers, speaker_voice_map=speaker_voice_map
+            no_speakers=not config.speakers_enabled, speaker_voice_map=speaker_voice_map
         )
         generation_config = types.GenerateContentConfig(
             response_modalities=["AUDIO"], speech_config=speech_config
@@ -464,11 +592,20 @@ async def _process_chunk(
                     config=generation_config,
                 )
                 audio_data = response.candidates[0].content.parts[0].inline_data.data
-                wav_data = _convert_to_wav(audio_data)
+                
+                # Create metadata for WAV file
+                metadata = _create_chunk_metadata(
+                    content_hash=chunk.content_hash,
+                    chunk_index=chunk.index,
+                    model=config.model,
+                    speakers=list(speaker_voice_map.keys())
+                )
+                
+                wav_data = _convert_to_wav(audio_data, metadata)
                 async with aiofiles.open(chunk.audio_path, "wb") as f:
                     await f.write(wav_data)
                 chunk.status = "success"
-                _log(f"Chunk {chunk.index}: Generated audio successfully", 3, config.verbose)
+                _log(f"Chunk {chunk.index}: Generated audio with metadata (hash: {chunk.content_hash[:12]}): {chunk.audio_path}", 2, config.verbose)
                 break
             except Exception as e:
                 error_msg = f"Attempt {attempt + 1}/{config.retries} failed: {e}"
@@ -503,7 +640,7 @@ async def run_tts_pipeline(
         full_text = _read_and_join_files(input_paths)
         _log(f"Read {len(input_paths)} input file(s), total characters: {len(full_text)}", 1, config.verbose)
         speaker_voice_map, all_speakers = {}, set()
-        if not config.no_speakers:
+        if config.speakers_enabled:
             speaker_voice_map, all_speakers = _determine_speakers(
                 full_text, speaker_config=config.speakers
             )
@@ -541,22 +678,36 @@ async def run_tts_pipeline(
         chunks = []
         out_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Save all text chunks before beginning TTS
-        _log("Saving all text chunks to disk...", 1, config.verbose)
+        # Save all text chunks before beginning TTS and generate hashes
+        _log("Saving all text chunks to disk and generating content hashes...", 1, config.verbose)
         for i, text_chunk in enumerate(text_chunks):
             base_name = f"{out_path.stem}_{i}"
+            content_hash = _generate_content_hash(
+                text_chunk, 
+                speaker_voice_map if config.hash_voices else None, 
+                config.hash_voices
+            )
+            
+            # Generate filename with optional hash
+            if config.chunk_filename_include_hash:
+                hash_suffix = f"_{content_hash[:8]}"
+                audio_filename = f"{base_name}{hash_suffix}.wav"
+            else:
+                audio_filename = f"{base_name}.wav"
+            
             chunk = Chunk(
                 index=i,
                 text=text_chunk,
                 text_path=out_path.parent / f"tmp_{base_name}.md",
-                audio_path=out_path.parent / f"{base_name}.wav",
+                audio_path=out_path.parent / audio_filename,
+                content_hash=content_hash,
             )
             chunks.append(chunk)
             
             # Save the text chunk to disk immediately
             async with aiofiles.open(chunk.text_path, 'w', encoding='utf-8') as f:
                 await f.write(text_chunk)
-            _log(f"Saved chunk {i+1}/{len(text_chunks)}: {chunk.text_path}", 2, config.verbose)
+            _log(f"Saved chunk {i+1}/{len(text_chunks)} (hash: {content_hash[:12]}): {chunk.text_path}", 2, config.verbose)
 
         _log(f"Processing {len(chunks)} chunks with {config.parallel} parallel requests", 1, config.verbose)
         _log(f"Configuration: max_tokens_per_chunk={config.max_chunk_tokens}, retries={config.retries}, retry_sleep={config.retry_sleep}s", 2, config.verbose)

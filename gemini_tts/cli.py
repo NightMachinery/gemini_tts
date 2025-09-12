@@ -38,11 +38,13 @@ def main():
         default="gemini-2.5-flash-preview-tts",
         help="The Gemini TTS model to use for token counting and generation. (Default: %(default)s)",
     )
+    max_chunk_tokens_default = 8192
+    #: 8192 is max supported by Flash TTS 2.5. Leave some margin of error if you want to use (old) offline token counters which are inaccurate.
     parser.add_argument(
         "--max-chunk-tokens",
         type=int,
-        default=8000, #: 8192 is max supported by Flash TTS 2.5, and I am leaving some margin of error
-        help="Max number of tokens per chunk. (Default: 8000)",
+        default=max_chunk_tokens_default,
+        help=f"Max number of tokens per chunk. (Default: {max_chunk_tokens_default})",
     )
     parser.add_argument(
         "--speakers",
@@ -55,9 +57,22 @@ Examples:
   'Host A:Zephyr,HostB' - Map a specific voice to a speaker.""",
     )
     parser.add_argument(
-        "--no-speakers",
-        action="store_true",
-        help="Disable multi-speaker mode entirely. Ignores --speakers.",
+        "--speakers-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable/disable multi-speaker mode. Use --no-speakers-enabled to disable.",
+    )
+    parser.add_argument(
+        "--hash-voices",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include speaker-voice mapping in content hash for better cache invalidation. Use --no-hash-voices to disable.",
+    )
+    parser.add_argument(
+        "--chunk-filename-include-hash",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include 8-char hash in chunk filenames for easy identification. Use --no-chunk-filename-include-hash to disable.",
     )
     parser.add_argument(
         "--parallel",
@@ -79,8 +94,9 @@ Examples:
     )
     parser.add_argument(
         "--cleanup-chunks",
-        action="store_true",
-        help="Remove intermediate chunk files after merging.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Remove intermediate chunk files after merging. Use --cleanup-chunks to enable.",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -106,7 +122,9 @@ Examples:
         model=model,
         max_chunk_tokens=args.max_chunk_tokens,
         speakers=args.speakers,
-        no_speakers=args.no_speakers,
+        speakers_enabled=args.speakers_enabled,
+        hash_voices=args.hash_voices,
+        chunk_filename_include_hash=args.chunk_filename_include_hash,
         parallel=args.parallel,
         retries=args.retries,
         retry_sleep=args.retry_sleep,
