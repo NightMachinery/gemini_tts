@@ -14,7 +14,15 @@ I want you to develop a `gemini_tts.py input_path ... ` multi-speaker TTS (podca
 - will also save each chunk as `tmp_${out}_i.md`
 - will check if the saved chunk exists and is the same, and if its audio file already exists. if so, skips redoing that chunk.
 - will redo chunks `--retries=3 --retry-sleep=70`.
-- will finally merge all the wav files into a single mp3 file using ffmpeg and VBR quality 3
+- will finally merge all the wav files into a single mp3 file using ffmpeg and VBR quality 3. wont run if at least one chunk failed to process.
+- create as a reusable library, and put the cli UI in another module which imports the library. I want to also expose this as a Telegram bot later.
+- use dataclasses for passing multiple outputs between functions
+- have a dataclass for the final output which has a `chunks: List[Chunk]` (Chunk: text, text path, audio path), `final_audio_path`, etc.
+- add Optional removal of intermediate files with `--cleanup-chunks` which will remove the chunk audio and text files after merging them into the final audio file. wont run if at least one chunk failed to process.
 
 Any questions or ideas to further improve?
+#+END_SRC
+
+#+BEGIN_SRC markdown
+Here are some example codes to help you get up-to-speed with the gemini tts api.
 #+END_SRC

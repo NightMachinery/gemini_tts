@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+
+from pynight.common_icecream import ic
+
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+
+try:
+    from .tts_lib import TTSConfig, run_tts_pipeline
+except ImportError:
+    print("Error: Could not import 'tts_lib'. Make sure 'tts_lib.py' is in the same directory.")
+    sys.exit(1)
+
+def main():
+    """Parses command-line arguments and runs the TTS pipeline."""
+    parser = argparse.ArgumentParser(
+        description="A multi-speaker TTS script to convert a podcast script into audio using Gemini APIs.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+
+    parser.add_argument("input_paths", nargs="+", help="One or more input text/markdown file paths.")
+    parser.add_argument("-o", "--out", help="The base path for output files. Defaults to the first input file's name.", default=None)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="models/gemini-1.5-flash-latest", # Placeholder for the actual multi-speaker TTS model
+        help="The Gemini TTS model to use for token counting and generation. (Default: %(default)s)"
+    )
+    parser.add_argument(
+        "--max-chunk-tokens",
+        type=int,
+        default=8192,
+        help="Max number of tokens per chunk. (Default: 8192)"
+    )
+    parser.add_argument(
+        "--speakers",
+        type=str,
+        default="auto:2",
+        help="""Speaker configuration.
+Examples:
+  'auto:2'              - (Default) Auto-detect the 2 most frequent speakers.
+  'Host A,Host B'       - Explicitly name two speakers.
+  'Host A:Zephyr,HostB' - Map a specific voice to a speaker."""
+    )
+    parser.add_argument("--no-speakers", action="store_true", help="Disable multi-speaker mode entirely. Ignores --speakers.")
+    parser.add_argument("--parallel", type=int, default=5, help="Number of parallel API calls to make. (Default: 5)")
+    parser.add_argument("--retries", type=int, default=3, help="Number of retries for a failed API call on a chunk. (Default: 3)")
+    parser.add_argument("--retry-sleep", type=int, default=65, help="Seconds to wait between retries. (Default: 65, for API rate limits)")
+    parser.add_argument("--cleanup-chunks", action="store_true", help="Remove intermediate chunk files after merging.")
+
+    args = parser.parse_args()
+
+    out_path = Path(args.out) if args.out else Path(args.input_paths[0]).with_suffix('')
+
+    # Use dependency injection by creating a config object
+    tts_config = TTSConfig(
+        model=args.model,
+        max_chunk_tokens=args.max_chunk_tokens,
+        speakers=args.speakers,
+        no_speakers=args.no_speakers,
+        parallel=args.parallel,
+        retries=args.retries,
+        retry_sleep=args.retry_sleep,
+        cleanup_chunks=args.cleanup_chunks,
+    )
+
+    # Run the main async pipeline
+    result = asyncio.run(run_tts_pipeline(
+        [Path(p) for p in args.input_paths],
+        out_path,
+        config=tts_config,
+    ))
+
+    print("-" * 50)
+    if result.success:
+        print(f"✅ Success! Final audio file created at: {result.final_audio_path}")
+    else:
+        print(f"❌ Failure: {result.message}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    # Ensure you have the required libraries installed:
+    # pip install google-generativeai aiofiles tqdm
+    # And ffmpeg installed on your system.
+    main()

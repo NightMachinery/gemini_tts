@@ -1,0 +1,4 @@
+include readme.org
+include requirements.txt
+include LICENSE
+recursive-include gemini_tts *.py
