@@ -19,7 +19,7 @@ except ImportError:
 def main():
     """Parses command-line arguments and runs the TTS pipeline."""
     parser = argparse.ArgumentParser(
-        description="A multi-speaker TTS script to convert a podcast script into audio using Gemini APIs.",
+        description="A multi-speaker TTS script to convert a podcast script into audio using the Gemini API.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
@@ -33,20 +33,23 @@ def main():
         default=None,
     )
     parser.add_argument(
+        "-m",
         "--model",
         type=str,
         default="gemini-2.5-flash-preview-tts",
         help="The Gemini TTS model to use for token counting and generation. (Default: %(default)s)",
     )
-    max_chunk_tokens_default = 8192
-    #: 8192 is max supported by Flash TTS 2.5. Leave some margin of error if you want to use (old) offline token counters which are inaccurate.
+    max_chunk_tokens_default = 8000
+    #: 8192 is max supported by Flash TTS 2.5. Leave more margin of error if you want to use (old) offline token counters which are inaccurate. Even the online token counter needs some margin of error.
     parser.add_argument(
+        "-t",
         "--max-chunk-tokens",
         type=int,
         default=max_chunk_tokens_default,
         help=f"Max number of tokens per chunk. (Default: {max_chunk_tokens_default})",
     )
     parser.add_argument(
+        "-s",
         "--speakers",
         type=str,
         default="auto:2",
@@ -57,10 +60,11 @@ Examples:
   'Host A:Zephyr,HostB' - Map a specific voice to a speaker.""",
     )
     parser.add_argument(
-        "--speakers-enabled",
+        "--multi-speakers",
         action=argparse.BooleanOptionalAction,
+        dest="speakers_enabled",
         default=True,
-        help="Enable/disable multi-speaker mode. Use --no-speakers-enabled to disable.",
+        help="Enable/disable multi-speaker mode. Use --no-multi-speakers to disable.",
     )
     parser.add_argument(
         "--hash-voices",
