@@ -34,6 +34,7 @@ class TTSConfig:
     retries: int
     retry_sleep: int
     cleanup_chunks: bool
+    verbose: int = 0
 
 
 @dataclass
@@ -63,6 +64,12 @@ class TTSResult:
 
 
 # --- Core Logic ---
+
+
+def _log(message: str, level: int, config_verbose: int):
+    """Log a message if the verbosity level is high enough."""
+    if config_verbose >= level:
+        print(f"[V{level}] {message}")
 
 
 def _read_and_join_files(input_paths: List[Path]) -> str:
@@ -113,7 +120,7 @@ def _determine_speakers(
         speakers = [
             speaker for speaker, _ in Counter(found_speakers).most_common(num_speakers)
         ]
-        print(f"Automatically detected speakers: {speakers}")
+        _log(f"Automatically detected speakers: {speakers}", 1, 1)  # Always show speaker detection
     else:
         speakers = [part.strip() for part in speaker_config.split(",")]
 
@@ -129,7 +136,7 @@ def _determine_speakers(
 
 
 async def _chunk_text(
-    text: str, *, speakers: Set[str], max_tokens: int, client, model: str
+    text: str, *, speakers: Set[str], max_tokens: int, client, model: str, verbose: int = 0
 ) -> List[str]:
     """Breaks text into chunks using a tokenizer, preferring speaker boundaries."""
     chunks: List[str] = []
@@ -149,15 +156,23 @@ async def _chunk_text(
         is_full = token_count > max_tokens
 
         if current_chunk_lines and (is_speaker_line or is_full):
-            chunks.append("\n".join(current_chunk_lines))
+            chunk_text = "\n".join(current_chunk_lines)
+            chunks.append(chunk_text)
+            _log(f"Created chunk {len(chunks)} with {token_count} tokens", 3, verbose)
             current_chunk_lines = [line]
         else:
             current_chunk_lines.append(line)
 
     if current_chunk_lines:
-        chunks.append("\n".join(current_chunk_lines))
+        chunk_text = "\n".join(current_chunk_lines)
+        chunks.append(chunk_text)
+        # Get final chunk token count
+        final_token_result = await client.aio.models.count_tokens(model=model, contents=chunk_text)
+        _log(f"Created final chunk {len(chunks)} with {final_token_result.total_tokens} tokens", 3, verbose)
 
-    return [chunk for chunk in chunks if chunk.strip()]
+    result_chunks = [chunk for chunk in chunks if chunk.strip()]
+    _log(f"Chunking complete: {len(result_chunks)} total chunks", 2, verbose)
+    return result_chunks
 
 
 # --- Audio and File Handling ---
@@ -191,9 +206,11 @@ def _convert_to_wav(audio_data: bytes) -> bytes:
     return header + audio_data
 
 
-def _merge_audio_files(chunks: List[Chunk], *, final_path: Path) -> bool:
+def _merge_audio_files(chunks: List[Chunk], *, final_path: Path, verbose: int = 0) -> bool:
     """Merges all chunk .wav files into a single .mp3 file using ffmpeg."""
-    print("Merging audio chunks into final MP3 file...")
+    _log("Merging audio chunks into final MP3 file...", 1, verbose)
+    successful_chunks = [c for c in chunks if c.status == "success"]
+    _log(f"Merging {len(successful_chunks)} successful chunks into {final_path}", 2, verbose)
     list_path = final_path.with_suffix(".txt")
     try:
         with open(list_path, "w", encoding="utf-8") as f:
@@ -219,7 +236,7 @@ def _merge_audio_files(chunks: List[Chunk], *, final_path: Path) -> bool:
         subprocess.run(
             command, capture_output=True, text=True, check=True, encoding="utf-8"
         )
-        print(f"Successfully created final audio file: {final_path}")
+        _log(f"Successfully created final audio file: {final_path}", 1, verbose)
         return True
     except FileNotFoundError:
         print(
@@ -234,9 +251,9 @@ def _merge_audio_files(chunks: List[Chunk], *, final_path: Path) -> bool:
             os.remove(list_path)
 
 
-def _cleanup_chunk_files(chunks: List[Chunk]):
+def _cleanup_chunk_files(chunks: List[Chunk], verbose: int = 0):
     """Removes intermediate text and audio files for all provided chunks."""
-    print("Cleaning up intermediate chunk files...")
+    _log(f"Cleaning up {len(chunks)} intermediate chunk files...", 1, verbose)
     for chunk in chunks:
         if chunk.text_path.exists():
             os.remove(chunk.text_path)
@@ -292,6 +309,7 @@ async def _process_chunk(
                 async with aiofiles.open(chunk.text_path, "r", encoding="utf-8") as f:
                     if await f.read() == chunk.text:
                         chunk.status = "skipped"
+                        _log(f"Chunk {chunk.index}: Using cached audio", 3, config.verbose)
                         progress_bar.update(1)
                         return
             except IOError:
@@ -325,9 +343,11 @@ async def _process_chunk(
                 async with aiofiles.open(chunk.audio_path, "wb") as f:
                     await f.write(wav_data)
                 chunk.status = "success"
+                _log(f"Chunk {chunk.index}: Generated audio successfully", 3, config.verbose)
                 break
             except Exception as e:
                 error_msg = f"Attempt {attempt + 1}/{config.retries} failed: {e}"
+                _log(f"Chunk {chunk.index}: {error_msg}", 2, config.verbose)
                 if attempt < config.retries - 1:
                     await asyncio.sleep(config.retry_sleep)
                 else:
@@ -353,21 +373,31 @@ async def run_tts_pipeline(
 
     try:
         client = genai.Client(api_key=api_key)
-
+        _log(f"Initialized Gemini client with model: {config.model}", 1, config.verbose)
+        
         full_text = _read_and_join_files(input_paths)
+        _log(f"Read {len(input_paths)} input file(s), total characters: {len(full_text)}", 1, config.verbose)
         speaker_voice_map, all_speakers = {}, set()
         if not config.no_speakers:
             speaker_voice_map, all_speakers = _determine_speakers(
                 full_text, speaker_config=config.speakers
             )
 
-        print("Chunking text based on token limits...")
+        _log("Chunking text based on token limits...", 1, config.verbose)
+        # Get total token count before chunking
+        total_token_result = await client.aio.models.count_tokens(
+            model=config.model, contents=full_text
+        )
+        total_tokens = total_token_result.total_tokens
+        _log(f"Total input tokens: {total_tokens}", 1, config.verbose)
+        
         text_chunks = await _chunk_text(
             full_text,
             speakers=all_speakers,
             max_tokens=config.max_chunk_tokens,
             client=client,
             model=config.model,
+            verbose=config.verbose,
         )
         if not text_chunks:
             return TTSResult(
@@ -375,6 +405,8 @@ async def run_tts_pipeline(
                 success=False,
                 message="No text chunks could be created from input.",
             )
+        
+        _log(f"Created {len(text_chunks)} chunks (max {config.max_chunk_tokens} tokens each)", 1, config.verbose)
 
         chunks = []
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -389,9 +421,8 @@ async def run_tts_pipeline(
                 )
             )
 
-        print(
-            f"Processing {len(chunks)} chunks with {config.parallel} parallel requests..."
-        )
+        _log(f"Processing {len(chunks)} chunks with {config.parallel} parallel requests", 1, config.verbose)
+        _log(f"Configuration: max_tokens_per_chunk={config.max_chunk_tokens}, retries={config.retries}, retry_sleep={config.retry_sleep}s", 2, config.verbose)
         semaphore = asyncio.Semaphore(config.parallel)
         progress = tqdm(total=len(chunks), desc="Generating Audio Chunks")
 
@@ -419,14 +450,14 @@ async def run_tts_pipeline(
             return result
 
         final_mp3_path = out_path.with_suffix(".mp3")
-        if not _merge_audio_files(result.chunks, final_path=final_mp3_path):
+        if not _merge_audio_files(result.chunks, final_path=final_mp3_path, verbose=config.verbose):
             result.success = False
             result.message = "Failed to merge audio chunks with ffmpeg."
             return result
 
         result.final_audio_path = final_mp3_path
         if config.cleanup_chunks:
-            _cleanup_chunk_files(result.chunks)
+            _cleanup_chunk_files(result.chunks, verbose=config.verbose)
 
         return result
     except Exception as e:

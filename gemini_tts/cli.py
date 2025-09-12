@@ -82,6 +82,12 @@ Examples:
         action="store_true",
         help="Remove intermediate chunk files after merging.",
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity level. Use -v for basic info, -vv for detailed info, -vvv for debug info.",
+    )
 
     args = parser.parse_args()
 
@@ -105,6 +111,7 @@ Examples:
         retries=args.retries,
         retry_sleep=args.retry_sleep,
         cleanup_chunks=args.cleanup_chunks,
+        verbose=args.verbose,
     )
 
     # Run the main async pipeline
