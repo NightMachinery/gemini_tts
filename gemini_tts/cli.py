@@ -7,6 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 import os
+from typing import List
 
 try:
     from .tts_lib import TTSConfig, run_tts_pipeline
@@ -35,6 +36,11 @@ def main():
             " (sans extension) is appended. Defaults to first input file's name."
         ),
         default=None,
+    )
+    parser.add_argument(
+        "--api-key-file",
+        type=Path,
+        help="Path to a file containing Google Gemini API keys, one per line.",
     )
     parser.add_argument(
         "-m",
@@ -84,9 +90,9 @@ Examples:
     )
     parser.add_argument(
         "--parallel",
-        type=int,
-        default=1,
-        help="Number of parallel API calls to make. (Default: 1)",
+        type=str,
+        default="1",
+        help="Number of parallel API calls. Use 'auto' to set based on number of API keys. (Default: 1)",
     )
     parser.add_argument(
         "--retries",
@@ -116,6 +122,39 @@ Examples:
 
     args = parser.parse_args()
 
+    # --- API Key Management ---
+    api_keys: List[str] = []
+    if args.api_key_file:
+        try:
+            with open(args.api_key_file, "r") as f:
+                api_keys = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            print(f"Error: API key file not found at {args.api_key_file}")
+            sys.exit(1)
+
+    if not api_keys:
+        env_key = os.getenv("GEMINI_API_KEY")
+        if env_key:
+            api_keys.append(env_key)
+
+    if not api_keys:
+        print(
+            "Error: No API key provided. Use --api-key-file or set the GEMINI_API_KEY environment variable."
+        )
+        sys.exit(1)
+
+    # --- Parallelism Configuration ---
+    if args.parallel.lower() == "auto":
+        parallel_count = len(api_keys)
+    else:
+        try:
+            parallel_count = int(args.parallel)
+            if parallel_count < 1:
+                raise ValueError
+        except ValueError:
+            print(f"Error: --parallel must be a positive integer or 'auto'.")
+            sys.exit(1)
+
     # Determine output base path. If --out ends with '/', treat it as a directory
     # and append the first input file's basename (sans extension).
     if args.out:
@@ -138,13 +177,14 @@ Examples:
 
     # Use dependency injection by creating a config object
     tts_config = TTSConfig(
+        api_keys=api_keys,
         model=model,
         max_chunk_tokens=args.max_chunk_tokens,
         speakers=args.speakers,
         speakers_enabled=args.multi_speakers_p,
         hash_voices=args.hash_voices,
         chunk_filename_include_hash=args.chunk_filename_include_hash,
-        parallel=args.parallel,
+        parallel=parallel_count,
         retries=args.retries,
         retry_sleep=args.retry_sleep,
         cleanup_chunks=args.cleanup_chunks,

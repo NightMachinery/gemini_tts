@@ -8,7 +8,7 @@ import re
 import struct
 import subprocess
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -41,6 +41,7 @@ DEFAULT_VOICES = list(GEMINI_VOICES.keys())
 class TTSConfig:
     """Bundles all operational configurations for the TTS pipeline."""
 
+    api_keys: List[str]
     model: str
     max_chunk_tokens: int
     speakers: str
@@ -79,6 +80,46 @@ class TTSResult:
     def get_failed_chunks(self) -> List[Chunk]:
         """Returns a list of chunks that failed processing."""
         return [chunk for chunk in self.chunks if chunk.status == "failed"]
+
+
+# --- API Key Management ---
+
+
+class KeyManager:
+    """Manages a pool of API keys for concurrent use and handles quota exhaustion."""
+
+    def __init__(self, keys: List[str]):
+        self._available_keys = asyncio.Queue()
+        for key in keys:
+            self._available_keys.put_nowait(key)
+        self.initial_key_count = len(keys)
+        self._exhausted_keys = set()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> Optional[str]:
+        """Acquire an available API key, polling to avoid deadlocks if all keys get exhausted."""
+        while not self.all_exhausted():
+            try:
+                # Wait for a short time to avoid blocking forever
+                key = await asyncio.wait_for(self._available_keys.get(), timeout=1.0)
+                return key
+            except asyncio.TimeoutError:
+                # Timed out, loop again to re-check all_exhausted status
+                continue
+        return None
+
+    async def release(self, key: str):
+        """Return an API key to the pool of available keys."""
+        await self._available_keys.put(key)
+
+    async def mark_exhausted(self, key: str):
+        """Permanently remove a key from rotation."""
+        async with self._lock:
+            self._exhausted_keys.add(key)
+
+    def all_exhausted(self) -> bool:
+        """Check if all keys in the pool have been marked as exhausted."""
+        return len(self._exhausted_keys) == self.initial_key_count
 
 
 # --- Core Logic ---
@@ -620,11 +661,11 @@ async def _process_chunk(
     progress_bar: tqdm,
     semaphore: asyncio.Semaphore,
     config: TTSConfig,
-    client,
+    clients: Dict[str, genai.Client],
+    key_manager: KeyManager,
     speaker_voice_map: Dict[str, str],
-    quota_event: Optional[asyncio.Event] = None,
 ):
-    """Processes a single text chunk, handling caching, API calls, and retries."""
+    """Processes a single text chunk, handling caching, API calls, and retries with key rotation."""
     async with semaphore:
         # Check if cached audio exists and has matching hash
         if chunk.audio_path.exists():
@@ -664,62 +705,63 @@ async def _process_chunk(
             async with aiofiles.open(chunk.text_path, "w", encoding="utf-8") as f:
                 await f.write(chunk.text)
 
-        speech_config = _build_speech_config(
-            no_speakers=not config.speakers_enabled, speaker_voice_map=speaker_voice_map
-        )
-        generation_config = types.GenerateContentConfig(
-            response_modalities=["AUDIO"], speech_config=speech_config
-        )
-
         for attempt in range(config.retries):
+            api_key = await key_manager.acquire()
+            if api_key is None:
+                chunk.status = "failed"
+                chunk.error_message = "All API keys are exhausted."
+                break  # No keys left, exit retry loop
+
+            client = clients[api_key]
             try:
+                speech_config = _build_speech_config(
+                    no_speakers=not config.speakers_enabled,
+                    speaker_voice_map=speaker_voice_map,
+                )
+                generation_config = types.GenerateContentConfig(
+                    response_modalities=["AUDIO"], speech_config=speech_config
+                )
                 contents = [
                     types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=chunk.text)],
+                        role="user", parts=[types.Part.from_text(text=chunk.text)]
                     )
                 ]
+
                 response = await client.aio.models.generate_content(
-                    model=config.model,
-                    contents=contents,
-                    config=generation_config,
+                    model=config.model, contents=contents, config=generation_config
                 )
                 audio_data = response.candidates[0].content.parts[0].inline_data.data
 
-                # Create metadata for WAV file
                 metadata = _create_chunk_metadata(
                     content_hash=chunk.content_hash,
                     chunk_index=chunk.index,
                     model=config.model,
                     speakers=list(speaker_voice_map.keys()),
                 )
-
                 wav_data = _convert_to_wav(audio_data, metadata)
                 async with aiofiles.open(chunk.audio_path, "wb") as f:
                     await f.write(wav_data)
+
                 chunk.status = "success"
                 _log(
-                    f"Chunk {chunk.index}: Generated audio with metadata (hash: {chunk.content_hash[:12]}): {chunk.audio_path}",
+                    f"Chunk {chunk.index}: Generated audio with key ...{api_key[-4:]} (hash: {chunk.content_hash[:12]}): {chunk.audio_path}",
                     2,
                     config.verbose,
                 )
-                break
+                await key_manager.release(api_key)
+                break  # Success, exit retry loop
+
             except Exception as e:
-                # Do not retry on quota exhaustion; fail immediately with a clear message
                 if _is_quota_exhausted_error(e):
-                    msg = (
-                        "Quota exhausted: The Gemini API reported RESOURCE_EXHAUSTED. "
-                        "No retries were attempted. See https://ai.google.dev/gemini-api/docs/rate-limits"
-                    )
+                    msg = f"Key ...{api_key[-4:]} is exhausted. Removing from pool."
                     _log(f"Chunk {chunk.index}: {msg}", 1, config.verbose)
-                    chunk.status = "failed"
-                    chunk.error_message = f"{msg}. Original error: {e}"
-                    if quota_event is not None:
-                        quota_event.set()
-                    break
+                    await key_manager.mark_exhausted(api_key)
+                else:
+                    await key_manager.release(api_key)  # Return key on non-quota errors
 
                 error_msg = f"Attempt {attempt + 1}/{config.retries} failed: {e}"
                 _log(f"Chunk {chunk.index}: {error_msg}", 2, config.verbose)
+
                 if attempt < config.retries - 1:
                     await asyncio.sleep(config.retry_sleep)
                 else:
@@ -735,17 +777,25 @@ async def run_tts_pipeline(
     input_paths: List[Path], out_path: Path, *, config: TTSConfig
 ) -> TTSResult:
     """Orchestrates the entire TTS process from text input to final audio file."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    if not config.api_keys:
         return TTSResult(
             chunks=[],
             success=False,
-            message="GEMINI_API_KEY environment variable not set.",
+            message="No Gemini API keys were provided.",
         )
 
     try:
-        client = genai.Client(api_key=api_key)
-        _log(f"Initialized Gemini client with model: {config.model}", 1, config.verbose)
+        # Initialize one client per key
+        clients = {key: genai.Client(api_key=key) for key in config.api_keys}
+        key_manager = KeyManager(config.api_keys)
+        # Use the first client for initial setup tasks like token counting
+        initial_client = next(iter(clients.values()))
+
+        _log(
+            f"Initialized {len(clients)} Gemini client(s) with model: {config.model}",
+            1,
+            config.verbose,
+        )
 
         full_text = _read_and_join_files(input_paths)
         _log(
@@ -766,7 +816,7 @@ async def run_tts_pipeline(
         if use_offline:
             total_tokens = _count_tokens_offline(tokenizer, full_text)
         else:
-            total_token_result = await client.aio.models.count_tokens(
+            total_token_result = await initial_client.aio.models.count_tokens(
                 model=config.model, contents=full_text
             )
             total_tokens = total_token_result.total_tokens
@@ -776,7 +826,7 @@ async def run_tts_pipeline(
             full_text,
             speakers=all_speakers,
             max_tokens=config.max_chunk_tokens,
-            client=client,
+            client=initial_client,
             model=config.model,
             verbose=config.verbose,
         )
@@ -848,55 +898,21 @@ async def run_tts_pipeline(
         semaphore = asyncio.Semaphore(config.parallel)
         progress = tqdm(total=len(chunks), desc="Generating Audio Chunks")
 
-        # Process chunks with controlled concurrency. If quota gets exhausted, stop
-        # scheduling new chunks but let in-flight tasks finish.
-        quota_event = asyncio.Event()
-
-        async def start_task(c: Chunk):
-            return asyncio.create_task(
+        tasks = [
+            asyncio.create_task(
                 _process_chunk(
-                    c,
+                    chunk,
                     progress_bar=progress,
                     semaphore=semaphore,
                     config=config,
-                    client=client,
+                    clients=clients,
+                    key_manager=key_manager,
                     speaker_voice_map=speaker_voice_map,
-                    quota_event=quota_event,
                 )
             )
-
-        idx = 0
-        running: Set[asyncio.Task] = set()
-
-        # Prime up to 'parallel' tasks
-        while (
-            idx < len(chunks)
-            and len(running) < config.parallel
-            and not quota_event.is_set()
-        ):
-            running.add(await start_task(chunks[idx]))
-            idx += 1
-
-        # As tasks finish, schedule next unless quota is exhausted
-        while running:
-            done, running = await asyncio.wait(
-                running, return_when=asyncio.FIRST_COMPLETED
-            )
-            # Schedule more to maintain concurrency if allowed
-            while (
-                idx < len(chunks)
-                and len(running) < config.parallel
-                and not quota_event.is_set()
-            ):
-                running.add(await start_task(chunks[idx]))
-                idx += 1
-
-        if quota_event.is_set():
-            _log(
-                "Quota exhausted detected. Stopped scheduling new chunks; waited for in-flight tasks to finish.",
-                1,
-                config.verbose,
-            )
+            for chunk in chunks
+        ]
+        await asyncio.gather(*tasks)
         progress.close()
 
         result = TTSResult(chunks=chunks)
