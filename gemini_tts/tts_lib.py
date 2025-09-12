@@ -260,6 +260,10 @@ def _count_tokens_offline(tokenizer, text: str) -> int:
 async def _count_tokens_online(client, model: str, text: str) -> int:
     """Count tokens using the online API."""
     result = await client.aio.models.count_tokens(model=model, contents=text)
+
+    # ic(result, model)
+    #: The model is indeed "gemini-2.5-flash-preview-tts", and yet we get the token overflow error even when using max_tokens=7500. I don't know why.
+
     return result.total_tokens
 
 
@@ -279,10 +283,13 @@ def _normalize_speaker_labels(text: str) -> str:
 
 
 def _determine_speakers(
-    text: str, *, speaker_config: str
+    text: str, *, speaker_config: str, min_freq: int = 5
 ) -> tuple[Dict[str, str], Set[str]]:
     """
     Parses speaker configuration to map speaker names to voices.
+
+    In 'auto' mode, a speaker must have appeared at least `min_freq` times
+    to be counted.
 
     Returns:
         A tuple containing (speaker_voice_map, all_speaker_names).
@@ -298,7 +305,7 @@ def _determine_speakers(
             )
 
         normalized_text = _normalize_speaker_labels(text)
-        speaker_regex = re.compile(r"^([^:]{1,25}):", re.MULTILINE)
+        speaker_regex = re.compile(r"^\s*([^][*#\s][^:]{0,25})\s*:", re.MULTILINE)
         found_speakers = [
             match.strip() for match in speaker_regex.findall(normalized_text)
         ]
@@ -308,9 +315,19 @@ def _determine_speakers(
                 "Auto speaker detection found no labels matching '^NAME:'."
             )
 
+        # Count speakers and filter by minimum frequency
+        speaker_counts = Counter(found_speakers)
         speakers = [
-            speaker for speaker, _ in Counter(found_speakers).most_common(num_speakers)
+            speaker
+            for speaker, count in speaker_counts.most_common(num_speakers)
+            if count >= min_freq
         ]
+
+        if not speakers:
+            raise ValueError(
+                f"Auto speaker detection found no labels appearing at least {min_freq} times."
+            )
+
         _log(
             f"Automatically detected speakers: {speakers}", 1, 1
         )  # Always show speaker detection
