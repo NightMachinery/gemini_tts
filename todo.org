@@ -1,8 +1,18 @@
 #+TITLE: gemini_tts/todo
 
+* =_determine_speakers=: see what happens if we increase the number of automatically determined speakers to more than the actual speaker number.
+If nothing breaks, it's a good idea to set higher limit. (allows guests in the podcasts, etc.)
+
+* allow specifiying a file where each line is an API key.
+When this file is specified, if `--parallel=auto`, then use as many parallel agents as there are keys (but each agent should use its own key).
+
+When a key fails with quota failure, mark it in an in-memory structure as exhausted, and if the parallel agents were created with `auto`, decrease agents by one. Retry that chunk using other agents instead of failing. Only fail when all keys have failed.
+
+Any ideas or improvements?
+
 * DONE If the output path contains dirs, create them if they don't exist
 
-* If the output path ends with `/`, add the basename (sans extension) of the first input file to it.
+* DONE If the output path ends with `/`, add the basename (sans extension) of the first input file to it.
 
 * DONE initial project description
 #+BEGIN_SRC markdown
