@@ -1,0 +1,20 @@
+#+TITLE: gemini_tts/todo
+
+* _
+#+BEGIN_SRC markdown
+I want you to develop a `gemini_tts.py input_path ... ` multi-speaker TTS (podcast script into audio) script that:
+- first read and join all input paths using `\n\n`
+- has a function to deterministically break the given input into chunks each lower than `--max-chunk-tokens=8192` on semantic boundaries (preferably on speaker boundaries)
+- has `--speakers='Host A,Host B` support, by default set this to `"auto:2"` which will use regexes `^[^:]{1,25}:` to find all possible speaker labels and select the N  (here 2) most frequent ones as the speaker labels (strip ending `:`).
+- before doing that, normalize speaker labels. some markdown docs might bold or italicize them, and we dont want that, so first replace all using regex
+- also supports `--no-speakers` to disable multi speaker mode entirely (should also skip the normalization above)
+- uses async api and can do the api calls for chunks in parallel: `--parallel=1`
+- saves each chunk to `${out}_i.wav` and support `-o,--out`, by default just strip the extension of the first input path
+- shows progress
+- will also save each chunk as `tmp_${out}_i.md`
+- will check if the saved chunk exists and is the same, and if its audio file already exists. if so, skips redoing that chunk.
+- will redo chunks `--retries=3 --retry-sleep=70`.
+- will finally merge all the wav files into a single mp3 file using ffmpeg and VBR quality 3
+
+Any questions or ideas to further improve?
+#+END_SRC
