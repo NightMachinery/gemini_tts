@@ -1,9 +1,9 @@
 #+TITLE: gemini_tts/todo
 
-* argparse: Interpolate the default in the help strings instead of hardcoding it.
-
 * IF `--files-as-chunk-boundary` (true by default) when reading multiple input files, treat each file as a chunk (break into further chunks if big enough)
 This leads to more semantic chunking.
+
+* argparse: Interpolate the default in the help strings instead of hardcoding it.
 
 * preprocess
 #+BEGIN_SRC markdown
