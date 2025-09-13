@@ -878,9 +878,14 @@ async def _process_chunk(
                 generation_config = types.GenerateContentConfig(
                     response_modalities=["AUDIO"], speech_config=speech_config
                 )
+                chunk_text = chunk.text
+                # if multi speakers
+                if config.speakers_enabled:
+                    chunk_text = f"""Task Instructions: Read the following podcast script aloud.\n\n---\n\n{chunk_text}"""
+
                 contents = [
                     types.Content(
-                        role="user", parts=[types.Part.from_text(text=chunk.text)]
+                        role="user", parts=[types.Part.from_text(text=chunk_text)]
                     )
                 ]
 
