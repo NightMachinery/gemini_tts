@@ -422,12 +422,26 @@ async def _chunk_text(
                 ) / CHARS_PER_TOKEN_ESTIMATE
 
                 # If we're getting close to the limit, switch to precise token counting
-                if estimated_tokens > max_tokens * 0.8:  # Use 80% threshold for safety
+                if estimated_tokens > max_tokens * 0.65:
                     break
 
                 chunk_lines.append(lines[end_idx])
                 current_chars += line_chars
                 end_idx += 1
+
+            while True:
+                test_chunk = "\n".join(chunk_lines)
+                token_count = await count_tokens(test_chunk)
+                if token_count <= max_tokens:
+                    break
+                else:
+                    _log(
+                        f"_chunk_text: popping one line from chunk_lines (which were estimated to fit based on character count), exceeded token limit {token_count} > {max_tokens}",
+                        4,
+                        verbose,
+                    )
+
+                    chunk_lines.pop()  # Remove the last line
 
             # Now use binary search to find the exact boundary using token counting
             if end_idx < len(
@@ -445,6 +459,11 @@ async def _chunk_text(
                     test_chunk = "\n".join(test_lines)
 
                     token_count = await count_tokens(test_chunk)
+                    _log(
+                        f"Binary search: mid={mid}, tokens={token_count}, max={max_tokens}, fits={token_count <= max_tokens}",
+                        4,
+                        verbose,
+                    )
 
                     if token_count <= max_tokens:
                         best_end = mid
@@ -455,8 +474,26 @@ async def _chunk_text(
                 chunk_lines = lines[current_line_idx : current_line_idx + best_end]
                 end_idx = current_line_idx + best_end
 
+                # Debug: verify the chosen chunk size
+                final_test_chunk = "\n".join(chunk_lines)
+                final_test_tokens = await count_tokens(final_test_chunk)
+                _log(
+                    f"Binary search result: best_end={best_end}, final_tokens={final_test_tokens}, max={max_tokens}",
+                    3,
+                    verbose,
+                )
+
         # If we have speaker detection, try to find a better breaking point
         if len(chunk_lines) > 1 and speaker_line_regex and end_idx < len(lines):
+            # Log pre-adjustment state
+            pre_adjust_text = "\n".join(chunk_lines)
+            pre_adjust_tokens = await count_tokens(pre_adjust_text)
+            _log(
+                f"Pre-speaker-adjustment: {len(chunk_lines)} lines, {pre_adjust_tokens} tokens",
+                4,
+                verbose,
+            )
+
             # Search backward from the end for the last speaker line
             for i in range(len(chunk_lines) - 1, 0, -1):
                 if speaker_line_regex.match(chunk_lines[i]):
@@ -464,9 +501,18 @@ async def _chunk_text(
                     speaker_line = chunk_lines[i]
                     chunk_lines = chunk_lines[:i]
                     end_idx = current_line_idx + i
+
+                    # Log post-adjustment state
+                    post_adjust_text = "\n".join(chunk_lines)
+                    post_adjust_tokens = await count_tokens(post_adjust_text)
                     _log(
                         f"Adjusted chunk boundary at speaker line: '{speaker_line[:50]}...'",
                         3,
+                        verbose,
+                    )
+                    _log(
+                        f"Post-speaker-adjustment: {len(chunk_lines)} lines, {post_adjust_tokens} tokens (was {pre_adjust_tokens})",
+                        4,
                         verbose,
                     )
                     break
@@ -474,9 +520,22 @@ async def _chunk_text(
         chunk_text = "\n".join(chunk_lines)
         if chunk_text.strip():
             chunks.append(chunk_text)
-            # Get actual token count for final logging
+            # Get actual token count for final logging AND assertion
+            final_token_count = await count_tokens(chunk_text)
+
+            # ASSERT: chunk must not exceed max_tokens
+            if final_token_count > max_tokens:
+                print(
+                    f"ERROR: Chunk {len(chunks)} has {final_token_count} tokens, exceeds max {max_tokens}"
+                )
+                print(f"Chunk text preview: {chunk_text[:200]}...")
+                print(f"Chunk lines count: {len(chunk_lines)}")
+                print(f"current_line_idx: {current_line_idx}, end_idx: {end_idx}")
+                raise AssertionError(
+                    f"Chunk {len(chunks)} exceeds max_tokens: {final_token_count} > {max_tokens}"
+                )
+
             if verbose >= 3:
-                final_token_count = await count_tokens(chunk_text)
                 _log(
                     f"Created chunk {len(chunks)} with {final_token_count} tokens",
                     3,
@@ -510,7 +569,9 @@ async def _chunk_text(
             return chunks_in
 
         # Trigger only when last chunk is notably small
-        SMALL_FRACTION = small_last_fraction  # ~<x% of the limit is considered too small
+        SMALL_FRACTION = (
+            small_last_fraction  # ~<x% of the limit is considered too small
+        )
         if last_tokens >= max_tokens * SMALL_FRACTION:
             return chunks_in
 
@@ -733,7 +794,9 @@ def _merge_audio_files(
         with open(list_path, "w", encoding="utf-8") as f:
             for chunk in mergeable_chunks:
                 # must have no single quotes
-                assert "'" not in str(chunk.audio_path.resolve()), f"Path contains single quote which breaks our quoting assumptions: {chunk.audio_path.resolve()}"
+                assert "'" not in str(
+                    chunk.audio_path.resolve()
+                ), f"Path contains single quote which breaks our quoting assumptions: {chunk.audio_path.resolve()}"
 
                 f.write(f"file '{chunk.audio_path.resolve()}'\n")
 
