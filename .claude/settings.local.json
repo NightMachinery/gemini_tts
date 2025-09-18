@@ -6,7 +6,8 @@
       "Bash(pip install:*)",
       "Bash(gemini-tts:*)",
       "Bash(python:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(black:*)"
     ],
     "deny": [],
     "ask": []
