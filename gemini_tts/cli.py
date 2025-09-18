@@ -174,16 +174,17 @@ Examples:
             sys.exit(1)
 
     # Determine output base path. If --out ends with '/', treat it as a directory
-    # and append the first input file's basename (sans extension).
+    # and append the first input file's basename.
+    #: KEEP the original input's extension, as we strip suffixes later, too
     if args.out:
         out_arg: str = str(args.out)
         if out_arg.endswith("/") or (os.sep != "/" and out_arg.endswith(os.sep)):
-            first_base = Path(args.input_paths[0]).with_suffix("").name
+            first_base = Path(args.input_paths[0]).name
             out_path = Path(out_arg) / first_base
         else:
             out_path = Path(out_arg)
     else:
-        out_path = Path(args.input_paths[0]).with_suffix("")
+        out_path = Path(args.input_paths[0])
 
     ##
     model = args.model
