@@ -49,7 +49,7 @@ def main():
         default="gemini-2.5-flash-preview-tts",
         help="The Gemini TTS model to use for token counting and generation. (Default: %(default)s)",
     )
-    max_chunk_tokens_default = 7500
+    max_chunk_tokens_default = 7000
     #: 8192 is max supported by Flash TTS 2.5. Leave more margin of error if you want to use (old) offline token counters which are inaccurate. Even the online token counter needs some margin of error.
     parser.add_argument(
         "-t",
